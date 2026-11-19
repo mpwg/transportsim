@@ -92,6 +92,8 @@ impl ScenarioV1 {
 pub(super) struct Payload {
     scenario: ScenarioV1,
     tick: Tick,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    network_revision: u64,
     development_ticks: u64,
     sequence: u64,
     paused: bool,
@@ -112,6 +114,7 @@ impl Payload {
         Self {
             scenario: ScenarioV1::from_simulation(sim),
             tick: sim.traffic,
+            network_revision: sim.network_revision,
             development_ticks: sim.development_ticks,
             sequence: sim.sequence,
             paused: sim.paused,
@@ -153,6 +156,7 @@ impl Payload {
             &sim.world.taxi,
         )?;
         sim.traffic = self.tick;
+        sim.network_revision = self.network_revision;
         sim.development_ticks = self.development_ticks;
         sim.sequence = self.sequence;
         sim.paused = self.paused;
@@ -171,7 +175,7 @@ pub(crate) struct LaneV1 {
     pub(crate) queue: Vec<QueueItemV1>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct QueueItemV1 {
     pub(crate) entry: QueueEntry,
@@ -188,4 +192,8 @@ pub(crate) struct QueueItemV1 {
 pub(crate) struct JunctionV1 {
     pub(crate) id: JunctionId,
     pub(crate) last_granted: Vec<(u16, LaneId)>,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }

@@ -575,7 +575,7 @@ impl Service {
         origin: ZoneId,
         destination: ZoneId,
         path: &TransitPath,
-        walk: impl Fn(ZoneId, ZoneId) -> Option<(u64, Vec<FootEdgeId>)>,
+        walk: impl Fn(ZoneId, ZoneId, &[FootEdgeId]) -> bool,
     ) -> bool {
         let mut zone = origin;
         let mut foot = path.access.as_slice();
@@ -588,13 +588,13 @@ impl Service {
             }) else {
                 return false;
             };
-            if walk(zone, link.from).is_none_or(|(_, route)| route != foot) {
+            if !walk(zone, link.from, foot) {
                 return false;
             }
             zone = link.to;
             foot = &ride.transfer_after;
         }
-        foot.is_empty() && walk(zone, destination).is_some_and(|(_, route)| route == path.egress)
+        foot.is_empty() && walk(zone, destination, &path.egress)
     }
 
     pub(crate) fn passenger_cohorts(&self) -> impl Iterator<Item = (u64, usize, u32)> + '_ {

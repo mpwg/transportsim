@@ -215,6 +215,56 @@ pub(crate) struct DemandSnapshot {
     transit: TransitState,
 }
 
+impl DemandSnapshot {
+    pub(crate) fn repair_car_paths(&mut self, config: &DemandSpec, road: &RoadState) {
+        let accesses: BTreeMap<_, _> = config
+            .zones
+            .iter()
+            .filter_map(|zone| Some((zone.id, zone.road_access?)))
+            .collect();
+        for cohort in self.cohorts.values_mut() {
+            let Some(JourneyPath::Car { from, movements }) = &mut cohort.path else {
+                continue;
+            };
+            let Some(&start) = accesses.get(&cohort.origin) else {
+                continue;
+            };
+            let Some(&end) = cohort.destination.and_then(|id| accesses.get(&id)) else {
+                continue;
+            };
+            if *from == start && road.supports_car_route(start, end, movements) {
+                continue;
+            }
+            if let Some((_, replacement)) = road.route(start, end) {
+                *from = start;
+                *movements = replacement;
+            }
+        }
+    }
+
+    pub(crate) fn redirect_turns(
+        &mut self,
+        turns: &[crate::MovementId],
+        feeder: crate::MovementId,
+    ) {
+        for cohort in self.cohorts.values_mut() {
+            if let Some(JourneyPath::Car { movements, .. }) = &mut cohort.path {
+                if !movements.iter().any(|movement| turns.contains(movement)) {
+                    continue;
+                }
+                *movements = movements
+                    .iter()
+                    .flat_map(|&movement| {
+                        [turns.contains(&movement).then_some(feeder), Some(movement)]
+                            .into_iter()
+                            .flatten()
+                    })
+                    .collect();
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Planning<'a> {
     road: &'a RoadState,
@@ -878,11 +928,6 @@ impl DemandState {
             }
             *active_modes.entry((id, JourneyMode::Taxi)).or_default() += u128::from(amount);
         }
-        let planning = Planning {
-            road,
-            service,
-            taxi,
-        };
         let mut total = u128::from(saved.arrived);
         for (&id, cohort) in &saved.cohorts {
             if id >= saved.next_id
@@ -906,14 +951,22 @@ impl DemandState {
                         self.spec.taxi_weight != 0 && taxi.can_carry(cohort.origin, to, road)
                     }
                     JourneyPath::Transit(path) => {
-                        service.valid_transit_path(cohort.origin, to, path, |a, b| {
-                            self.walking.route(a, b)
-                        })
+                        self.spec.transit_weight != 0
+                            && service.valid_transit_path(cohort.origin, to, path, |a, b, route| {
+                                self.walking.supports_route(a, b, route)
+                            })
                     }
-                    _ => self
-                        .options(cohort.origin, to, cohort.created, planning)
-                        .iter()
-                        .any(|(_, candidate)| candidate == path),
+                    JourneyPath::Walk(edges) => {
+                        self.spec.walk_weight != 0
+                            && self.walking.supports_route(cohort.origin, to, edges)
+                    }
+                    JourneyPath::Car { from, movements } => {
+                        self.spec.car_weight != 0
+                            && self.zones[&cohort.origin].road_access == Some(*from)
+                            && self.zones[&to]
+                                .road_access
+                                .is_some_and(|end| road.supports_car_route(*from, end, movements))
+                    }
                 };
                 if !valid {
                     return Err(error("demand.path"));

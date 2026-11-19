@@ -40,7 +40,7 @@ impl fmt::Display for SaveError {
 
 impl std::error::Error for SaveError {}
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum LoadError {
     /// Invalid JSON or a value that does not match the wire schema.

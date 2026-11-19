@@ -24,21 +24,21 @@ pub enum QueueEntry {
 }
 
 impl QueueEntry {
-    fn unit_space(&self) -> u32 {
+    pub(crate) fn unit_space(&self) -> u32 {
         match self {
             Self::PrivateCars(_) => CAR_SPACE_MM,
             Self::Vehicle { length_mm, .. } => length_mm.get(),
         }
     }
 
-    fn units(&self) -> u32 {
+    pub(crate) fn units(&self) -> u32 {
         match self {
             Self::PrivateCars(count) => count.get(),
             Self::Vehicle { .. } => 1,
         }
     }
 
-    fn kind(&self) -> VehicleKind {
+    pub(crate) fn kind(&self) -> VehicleKind {
         match self {
             Self::PrivateCars(_) => VehicleKind::Car,
             Self::Vehicle { kind, .. } => *kind,
@@ -52,7 +52,7 @@ impl QueueEntry {
         }
     }
 
-    fn first_units(&self, units: NonZeroU32) -> Self {
+    pub(crate) fn first_units(&self, units: NonZeroU32) -> Self {
         match self {
             Self::PrivateCars(_) => Self::PrivateCars(units),
             vehicle => vehicle.clone(),
@@ -530,7 +530,7 @@ impl RoadState {
         mut lane_id: LaneId,
         entry: &QueueEntry,
         route: impl IntoIterator<Item = &'a MovementId>,
-    ) -> Result<(), RoadValidationError> {
+    ) -> Result<LaneId, RoadValidationError> {
         let kind = entry.kind();
         let unit_space = entry.unit_space();
         self.validate_lane(lane_id, kind, unit_space)?;
@@ -546,7 +546,28 @@ impl RoadState {
             lane_id = movement.to;
             self.validate_lane(lane_id, kind, unit_space)?;
         }
-        Ok(())
+        Ok(lane_id)
+    }
+
+    pub(crate) fn supports_vehicle_route(
+        &self,
+        from: LaneId,
+        to: LaneId,
+        entry: &QueueEntry,
+        movements: &[MovementId],
+    ) -> bool {
+        self.validate_route(from, entry, movements)
+            .is_ok_and(|end| end == to)
+    }
+
+    pub(crate) fn supports_car_route(
+        &self,
+        from: LaneId,
+        to: LaneId,
+        movements: &[MovementId],
+    ) -> bool {
+        self.validate_route(from, &QueueEntry::PrivateCars(NonZeroU32::MIN), movements)
+            .is_ok_and(|end| end == to)
     }
 
     fn validate_lane(

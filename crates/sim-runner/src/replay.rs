@@ -3,8 +3,8 @@ use std::io::Write;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sim_core::{
-    AdvanceReport, ClockObservation, Command, Observation, Query, QueueEntry, Simulation,
-    VehicleKind, WaitReason,
+    AdvanceReport, ClockObservation, Command, EditCommand, Observation, Query, QueueEntry,
+    Simulation, VehicleKind, WaitReason,
 };
 
 #[derive(Deserialize)]
@@ -23,6 +23,7 @@ enum CommandInput {
         line: sim_core::LineId,
         ticks: std::num::NonZeroU32,
     },
+    CommitEdit(EditCommand),
     Step,
 }
 
@@ -32,6 +33,7 @@ impl CommandInput {
             Self::SetPaused(paused) => Command::SetPaused(paused),
             Self::SetGrowthPaused(paused) => Command::SetGrowthPaused(paused),
             Self::SetLineHeadway { line, ticks } => Command::SetLineHeadway { line, ticks },
+            Self::CommitEdit(edit) => Command::CommitEdit(edit),
             Self::Step => return Ok(Some(simulation.step()?)),
         };
         simulation.apply(command)?;

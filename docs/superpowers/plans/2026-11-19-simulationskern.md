@@ -133,6 +133,8 @@ Ein `CommandReceipt` enthält Tick, Eingabesequenz, betroffene IDs und fachliche
 
 **Dateien** `crates/sim-core/src/{edit,world,network,routing,traffic,service,taxi}.rs`, `crates/sim-core/tests/edit.rs`.
 
+**Zwischenstand.** Bauvorschau, Netzrevision, transaktionale Signal- und Spuränderungen, Abbiegetaschen sowie Umleitung auf eine erreichbare Straßenverbindung sind umgesetzt und über Neustart geprüft. Es folgen die Warte- und Ausstiegszustände bei unterbrochenen Wegen, die übrigen Bauwerkzeuge und ihre Abnahme.
+
 - [ ] `edit` testet bei der Brücke eine Tasche für drei Pkw und eine für zwei. Erstere erlaubt Bus 12 die Fahrt beim nächsten Geradeausgrün, letztere lässt einen Linksabbieger vor ihm. Prüfe eine veraltete Revision, inzwischen volle Zielspur, widersprüchliche Ampelphase, versetztes Gebäude mit gleicher ID und Einwohnerzahl und unerreichbaren ÖPNV-Halt. Prüfe unterbrochene Privatfahrt mit erreichbarer Ausstiegszufahrt und ohne jeden Ausstieg.
 - [ ] `cargo test -p sim-core --test edit` rot prüfen.
 - [ ] `Simulation::preview` und `Command::CommitEdit` mit gleicher Prüfung auf Revision und gegenwärtiger Belegung verdrahten. Die Vorschau ist rein lesend, die Bestätigung übernimmt den vollständigen vorbereiteten Zustand. Straßenverbindungen, Fahrtrichtungen, Spuren, Signale, Gehwege, Begrünung, Gleise, Halte, Linien und Takte als typisierte Varianten modellieren. Betroffene Einträge nur physisch erreichbar umlegen. Lage der Abbiegetasche und Reihenfolge erhalten. Bei unterbrochener Linie oder Taxifahrt bleiben Auftrag und Belegung nachvollziehbar. Abgeschnittene Privatmengen verlassen die Straße nur an erreichbaren Ausstiegen und bleiben andernfalls mit Wartegrund auf der Spur. Geänderte Verbindungen lösen gezielte Neuplanung aus.

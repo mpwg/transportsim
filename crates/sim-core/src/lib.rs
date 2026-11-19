@@ -1,6 +1,7 @@
 //! Deterministic, headless traffic simulation.
 
 mod demand;
+mod edit;
 mod ids;
 mod junction;
 mod network;
@@ -45,3 +46,5 @@ pub use taxi::{
     TaxiAssignment, TaxiError, TaxiObservation, TaxiSpec, TaxiStatus, TaxiVehicleObservation,
     TaxiVehicleSpec,
 };
+
+pub use edit::{EditAction, EditCommand, EditError, EditPreview, TurnPocket};

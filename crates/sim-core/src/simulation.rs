@@ -3,6 +3,7 @@ use crate::world::World;
 use crate::{
     ClockObservation, Observation, Query, QueryError, RuleSet, Scenario, Tick, ValidationError,
 };
+use crate::{EditCommand, EditError, EditPreview, edit};
 use std::{fmt, num::NonZeroU32};
 
 /// A mutation applied at a completed simulation boundary.
@@ -10,6 +11,7 @@ use std::{fmt, num::NonZeroU32};
 pub enum Command {
     SetPaused(bool),
     SetGrowthPaused(bool),
+    CommitEdit(EditCommand),
     SetLineHeadway { line: LineId, ticks: NonZeroU32 },
 }
 
@@ -18,6 +20,7 @@ pub enum Command {
 pub struct CommandReceipt {
     pub sequence: u64,
     pub tick: Tick,
+    pub edit: Option<EditPreview>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -25,11 +28,13 @@ pub struct CommandReceipt {
 pub enum CommandError {
     SequenceOverflow,
     UnknownLine(LineId),
+    Edit(EditError),
 }
 
 impl fmt::Display for CommandError {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Edit(error) => error.fmt(out),
             Self::UnknownLine(line) => write!(out, "unknown line ID {}", line.get()),
             Self::SequenceOverflow => out.write_str("command sequence overflow"),
         }
@@ -74,6 +79,7 @@ pub struct Simulation {
     pub(crate) traffic: Tick,
     pub(crate) development_ticks: u64,
     pub(crate) sequence: u64,
+    pub(crate) network_revision: u64,
     pub(crate) paused: bool,
     pub(crate) growth_paused: bool,
     pub(crate) scenario: Scenario,
@@ -97,9 +103,20 @@ impl Simulation {
             traffic,
             development_ticks: 0,
             sequence: 0,
+            network_revision: 0,
             paused: false,
             growth_paused: false,
         })
+    }
+
+    /// Current revision of the editable network.
+    pub fn network_revision(&self) -> u64 {
+        self.network_revision
+    }
+
+    /// Tests an edit against a copy of the current state.
+    pub fn preview(&self, edit: &EditCommand) -> Result<EditPreview, EditError> {
+        Ok(crate::edit::prepare(self, edit)?.preview)
     }
 
     pub fn apply(&mut self, command: Command) -> Result<CommandReceipt, CommandError> {
@@ -107,9 +124,17 @@ impl Simulation {
             .sequence
             .checked_add(1)
             .ok_or(CommandError::SequenceOverflow)?;
+        let mut receipt_edit = None;
         match command {
             Command::SetPaused(paused) => self.paused = paused,
             Command::SetGrowthPaused(paused) => self.growth_paused = paused,
+            Command::CommitEdit(edit) => {
+                let prepared = edit::prepare(self, &edit).map_err(CommandError::Edit)?;
+                self.scenario = prepared.scenario;
+                self.world = prepared.world;
+                self.network_revision = prepared.preview.revision;
+                receipt_edit = Some(prepared.preview);
+            }
             Command::SetLineHeadway { line, ticks } => {
                 if !self.world.service.set_headway(line, self.traffic, ticks) {
                     return Err(CommandError::UnknownLine(line));
@@ -120,6 +145,7 @@ impl Simulation {
         Ok(CommandReceipt {
             sequence,
             tick: self.traffic,
+            edit: receipt_edit,
         })
     }
 

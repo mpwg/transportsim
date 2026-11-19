@@ -148,6 +148,61 @@ fn replay_preserves_same_boundary_command_order_and_trace_suffix() {
 }
 
 #[test]
+fn replay_persists_capacity_edit_and_rejects_stale_revision_after_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let commands = dir.path().join("commands.json");
+    let checkpoint = dir.path().join("checkpoint.json");
+    let trace_path = dir.path().join("trace.jsonl");
+    fs::write(
+        &commands,
+        r#"[
+            {"tick":10,"command":{"commit_edit":{
+                "expected_revision":0,"actions":[{"set_capacity":{"lane":1,"capacity_mm":120000}}]
+            }}}
+        ]"#,
+    )
+    .unwrap();
+
+    let edited = summary(run(&[
+        ("--scenario", bridge().as_os_str()),
+        ("--commands", commands.as_os_str()),
+        ("--until-tick", OsStr::new("10")),
+        ("--trace", trace_path.as_os_str()),
+        ("--save", checkpoint.as_os_str()),
+    ]));
+    assert_eq!(edited["tick"], 10);
+    assert_eq!(edited["lanes"][0]["id"], 1);
+    assert_eq!(edited["lanes"][0]["capacity_mm"], 120_000);
+    let rows = trace(&trace_path);
+    let before_edit = rows.last().unwrap();
+    assert_eq!(before_edit["tick"], 10);
+    assert_eq!(before_edit["lanes"][0]["capacity_mm"], 60_000);
+    assert_eq!(summary(run(&[("--load", checkpoint.as_os_str())])), edited);
+
+    fs::write(
+        &commands,
+        r#"[
+            {"tick":11,"command":{"commit_edit":{
+                "expected_revision":0,"actions":[{"set_capacity":{"lane":1,"capacity_mm":180000}}]
+            }}}
+        ]"#,
+    )
+    .unwrap();
+    let destination = dir.path().join("destination.json");
+    let output = run(&[
+        ("--load", checkpoint.as_os_str()),
+        ("--commands", commands.as_os_str()),
+        ("--until-tick", OsStr::new("11")),
+        ("--save", destination.as_os_str()),
+    ]);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("cannot apply command at tick 11"), "{error}");
+    assert!(error.contains("outdated network revision"), "{error}");
+    assert!(!destination.exists());
+}
+
+#[test]
 fn replay_rejects_invalid_boundaries_without_creating_a_save() {
     let dir = tempfile::tempdir().unwrap();
     let commands = dir.path().join("commands.json");

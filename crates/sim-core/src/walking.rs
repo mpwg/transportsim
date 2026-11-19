@@ -210,17 +210,19 @@ impl Walking {
         Some((total, path))
     }
 
-    fn connected(&self, mut zone: ZoneId, route: &[FootEdgeId]) -> bool {
+    fn route_end(&self, mut zone: ZoneId, route: &[FootEdgeId]) -> Option<ZoneId> {
         for id in route {
-            let Some(edge) = self.edges.get(id) else {
-                return false;
-            };
+            let edge = self.edges.get(id)?;
             if edge.spec.from != zone {
-                return false;
+                return None;
             }
             zone = edge.spec.to;
         }
-        true
+        Some(zone)
+    }
+
+    pub(crate) fn supports_route(&self, from: ZoneId, to: ZoneId, route: &[FootEdgeId]) -> bool {
+        self.route_end(from, route) == Some(to)
     }
 
     pub(crate) fn enter(
@@ -237,7 +239,7 @@ impl Walking {
             return 0;
         };
         let accepted = count.min(edge.available());
-        if accepted == 0 || !self.connected(edge.spec.to, remaining) {
+        if accepted == 0 || self.route_end(edge.spec.to, remaining).is_none() {
             return 0;
         }
         self.edges
@@ -361,7 +363,7 @@ impl Walking {
                 if group.count == 0
                     || group.entered_at < previous_entry
                     || group.entered_at > tick
-                    || !self.connected(edge.spec.to, &group.remaining)
+                    || self.route_end(edge.spec.to, &group.remaining).is_none()
                 {
                     return Err(error());
                 }
