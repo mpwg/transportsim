@@ -93,10 +93,10 @@ Ein `CommandReceipt` enthält Tick, Eingabesequenz, betroffene IDs und fachliche
 
 **Dateien** `crates/sim-runner/src/{file_store,main}.rs`, `crates/sim-runner/tests/file_store.rs`.
 
-- [ ] `atomic_save_keeps_previous_file_until_replace` mit echtem temporärem Verzeichnis und zwei unterschiedlichen gültigen Spielständen. Einen kurzen Schreibvorgang, einen Schreibfehler, Fehler beim Datei-Sync und Fehler beim Austausch gezielt auslösen. Vor Austausch bleibt O bytegleich und ladbar. Nach Austausch und fehlgeschlagenem Verzeichnis-Sync ist N vollständig ladbar, Status `DurabilityUnconfirmed`. Zwei konkurrierende Writer für dasselbe Pfadziel werden serialisiert und Leser sehen nur vollständige Dateien.
-- [ ] `cargo test -p sim-runner --test file_store` rot prüfen.
-- [ ] `FileStore::write(&self, path: &Path, bytes: &[u8]) -> Result<(), StoreError>` und `FileStore::read(&self, path: &Path) -> Result<Vec<u8>, StoreError>` implementieren. Dateiablage begrenzt das Lesen schon vor vollständiger Allokation. Unter einem exklusiven zielbezogenen Lock im selben Verzeichnis temporär schreiben, Datei synchronisieren, atomar ersetzen und erforderlichen Verzeichnis-Sync durchführen. Pfad-Aliasse über kanonisches Elternverzeichnis behandeln. Die Sperre bei jedem Rückgabepfad zuverlässig freigeben. Änderungen an einem Ziel und sein Fehlerstatus dürfen keine fremde Datei verändern.
-- [ ] Einzeltest inklusive erneutem Versuch nach Fehler und Workspace grün. Commit `feat: Spielstände atomar und haltbar ablegen`.
+- [x] `atomic_save_keeps_previous_file_until_replace` mit echtem temporärem Verzeichnis und zwei unterschiedlichen gültigen Spielständen. Einen kurzen Schreibvorgang, einen Schreibfehler, Fehler beim Datei-Sync und Fehler beim Austausch gezielt auslösen. Vor Austausch bleibt O bytegleich und ladbar. Nach Austausch und fehlgeschlagenem Verzeichnis-Sync ist N vollständig ladbar, Status `DurabilityUnconfirmed`. Zwei konkurrierende Writer für dasselbe Pfadziel werden serialisiert und Leser sehen nur vollständige Dateien.
+- [x] `cargo test -p sim-runner --test file_store` rot prüfen.
+- [x] `FileStore::write(&self, path: &Path, bytes: &[u8]) -> Result<(), StoreError>` und `FileStore::read(&self, path: &Path) -> Result<Vec<u8>, StoreError>` implementieren. Dateiablage begrenzt das Lesen schon vor vollständiger Allokation. Unter einem exklusiven zielbezogenen Lock im selben Verzeichnis temporär schreiben, Datei synchronisieren, atomar ersetzen und erforderlichen Verzeichnis-Sync durchführen. Pfad-Aliasse über kanonisches Elternverzeichnis behandeln. Die Sperre bei jedem Rückgabepfad zuverlässig freigeben. Änderungen an einem Ziel und sein Fehlerstatus dürfen keine fremde Datei verändern.
+- [x] Einzeltest inklusive erneutem Versuch nach Fehler und Workspace grün. Commit `feat: Spielstände atomar und haltbar ablegen`.
 
 ## Etappe B · Vollständige Reisen abwickeln
 

@@ -1,6 +1,6 @@
+mod file_store;
 mod replay;
 
-use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -10,6 +10,7 @@ use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use sim_core::Simulation;
 
+use file_store::FileStore;
 use replay::{Replay, Snapshot};
 
 #[derive(Parser)]
@@ -70,6 +71,17 @@ fn main() -> ExitCode {
 
 fn run(args: RunArgs) -> Result<()> {
     let trace = args.trace.as_deref().map(output_entry).transpose()?;
+    if let Some(save) = &args.save {
+        let (_, save_entry) = output_entry(save)?;
+        for input in [&args.scenario, &args.commands].into_iter().flatten() {
+            let (_, input_entry) = output_entry(input)?;
+            anyhow::ensure!(
+                save_entry != input_entry && !same_file(&save_entry, &input_entry)?,
+                "--save must use a separate file from {}",
+                input.display()
+            );
+        }
+    }
     if let Some((_, trace)) = &trace {
         for other in [&args.scenario, &args.load, &args.commands, &args.save]
             .into_iter()
@@ -120,7 +132,8 @@ fn run(args: RunArgs) -> Result<()> {
             .collect(),
     };
     if let Some(path) = args.save {
-        fs::write(&path, sim.save()?)
+        FileStore
+            .write(&path, &sim.save()?)
             .with_context(|| format!("cannot write checkpoint {}", path.display()))?;
     }
 
@@ -132,7 +145,9 @@ fn run(args: RunArgs) -> Result<()> {
 }
 
 fn read(path: &Path) -> Result<Vec<u8>> {
-    fs::read(path).with_context(|| format!("cannot read {}", path.display()))
+    FileStore
+        .read(path)
+        .with_context(|| format!("cannot read {}", path.display()))
 }
 
 fn output_entry(path: &Path) -> Result<(PathBuf, PathBuf)> {

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow = "1"
+blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 same-file = "1"
 sim-core = { path = "../sim-core" }

@@ -351,3 +351,31 @@ fn new_process_preserves_rotating_priority_and_fractional_discharge() {
     assert_eq!(rows, trace(&full_trace)[2..]);
     assert_eq!(resumed, full);
 }
+
+#[test]
+fn checkpoint_can_be_updated_in_place_but_cannot_replace_its_scenario() {
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = dir.path().join("bridge.json");
+    let checkpoint = dir.path().join("checkpoint.json");
+    let initial = fs::read(bridge()).unwrap();
+    fs::write(&scenario, &initial).unwrap();
+    let output = run(&[
+        ("--scenario", scenario.as_os_str()),
+        ("--save", scenario.as_os_str()),
+    ]);
+    assert!(!output.status.success());
+    assert_eq!(fs::read(&scenario).unwrap(), initial);
+
+    summary(run(&[
+        ("--scenario", scenario.as_os_str()),
+        ("--until-tick", OsStr::new("10")),
+        ("--save", checkpoint.as_os_str()),
+    ]));
+    let advanced = summary(run(&[
+        ("--load", checkpoint.as_os_str()),
+        ("--until-tick", OsStr::new("13")),
+        ("--save", checkpoint.as_os_str()),
+    ]));
+    let reopened = summary(run(&[("--load", checkpoint.as_os_str())]));
+    assert_eq!(reopened, advanced);
+}
