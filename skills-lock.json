@@ -1,0 +1,29 @@
+{
+  "version": 2,
+  "skills": {
+    "game-art": {
+      "source": "agent-skills-hub/agent-skills-hub",
+      "ref": "main",
+      "commit": "efc0b9639b83cf19aa73cc1b74844a6f302fe7ca",
+      "sourceType": "github",
+      "skillPath": "skills/game-development/game-art/SKILL.md",
+      "computedHash": "cc316f098844246bf9ac657e15ef64ae4933741d2a71fbf937d18e35ec81f9ae"
+    },
+    "game-audio": {
+      "source": "agent-skills-hub/agent-skills-hub",
+      "ref": "main",
+      "commit": "efc0b9639b83cf19aa73cc1b74844a6f302fe7ca",
+      "sourceType": "github",
+      "skillPath": "skills/game-development/game-audio/SKILL.md",
+      "computedHash": "b1d10a72244358770d658cf79e83baf6f1a4338432d4b5eba28836bb28738f27"
+    },
+    "game-design": {
+      "source": "agent-skills-hub/agent-skills-hub",
+      "ref": "main",
+      "commit": "efc0b9639b83cf19aa73cc1b74844a6f302fe7ca",
+      "sourceType": "github",
+      "skillPath": "skills/game-development/game-design/SKILL.md",
+      "computedHash": "8a50845f41370fe08f43db99b5fd375dcdc919a3bb3551c652ba73c796d3a738"
+    }
+  }
+}
