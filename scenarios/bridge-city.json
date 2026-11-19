@@ -1,0 +1,340 @@
+{
+  "seed": 41,
+  "start": 0,
+  "development_period_ticks": 86400,
+  "building_ids": [1, 2, 3, 4, 5, 6],
+  "lanes": [
+    {"id": 1, "capacity_mm": 80000, "travel_ticks": 3, "discharge": {"millimetres": 20000, "ticks": 1}, "allowed": ["car", "bus", "taxi"]},
+    {"id": 2, "capacity_mm": 45000, "travel_ticks": 3, "discharge": {"millimetres": 15000, "ticks": 1}, "allowed": ["car", "taxi"]},
+    {"id": 3, "capacity_mm": 60000, "travel_ticks": 5, "discharge": {"millimetres": 15000, "ticks": 1}, "allowed": ["car", "bus", "taxi"]},
+    {"id": 4, "capacity_mm": 100000, "travel_ticks": 7, "discharge": {"millimetres": 30000, "ticks": 1}, "allowed": ["car", "taxi"]},
+    {"id": 5, "capacity_mm": 100000, "travel_ticks": 7, "discharge": {"millimetres": 30000, "ticks": 1}, "allowed": ["car", "taxi"]},
+    {"id": 6, "capacity_mm": 60000, "travel_ticks": 5, "discharge": {"millimetres": 20000, "ticks": 1}, "allowed": ["car", "bus", "taxi"]},
+    {"id": 7, "capacity_mm": 100000, "travel_ticks": 5, "discharge": {"millimetres": 30000, "ticks": 1}, "allowed": ["car", "bus", "taxi"]},
+    {"id": 8, "capacity_mm": 60000, "travel_ticks": 3, "discharge": {"millimetres": 20000, "ticks": 1}, "allowed": ["car", "taxi"]},
+    {"id": 11, "capacity_mm": 65000, "travel_ticks": 5, "discharge": {"millimetres": 30000, "ticks": 1}, "allowed": ["tram"]},
+    {"id": 12, "capacity_mm": 65000, "travel_ticks": 8, "discharge": {"millimetres": 30000, "ticks": 1}, "allowed": ["tram"]},
+    {"id": 13, "capacity_mm": 65000, "travel_ticks": 7, "discharge": {"millimetres": 30000, "ticks": 1}, "allowed": ["tram"]}
+  ],
+  "movements": [
+    {"id": 1, "from": 1, "to": 2, "junction": 1, "conflict_zones": [1], "priority": 0},
+    {"id": 2, "from": 1, "to": 3, "junction": 1, "conflict_zones": [1], "priority": 0},
+    {"id": 3, "from": 2, "to": 7, "junction": 2, "conflict_zones": [3], "priority": 0},
+    {"id": 4, "from": 3, "to": 4, "junction": 2, "conflict_zones": [4], "priority": 0},
+    {"id": 5, "from": 4, "to": 5, "junction": 2, "conflict_zones": [5], "priority": 0},
+    {"id": 6, "from": 5, "to": 6, "junction": 2, "conflict_zones": [6], "priority": 0},
+    {"id": 7, "from": 6, "to": 7, "junction": 2, "conflict_zones": [7], "priority": 0},
+    {"id": 8, "from": 7, "to": 1, "junction": 2, "conflict_zones": [8], "priority": 0},
+    {"id": 9, "from": 3, "to": 6, "junction": 2, "conflict_zones": [9], "priority": 0},
+    {"id": 11, "from": 7, "to": 8, "junction": 2, "conflict_zones": [11], "priority": 0},
+    {"id": 12, "from": 8, "to": 1, "junction": 2, "conflict_zones": [12], "priority": 0},
+    {"id": 13, "from": 11, "to": 12, "junction": 3, "conflict_zones": [13], "priority": 0},
+    {"id": 14, "from": 12, "to": 13, "junction": 3, "conflict_zones": [14], "priority": 0},
+    {"id": 15, "from": 13, "to": 11, "junction": 3, "conflict_zones": [15], "priority": 0}
+  ],
+  "junctions": [
+    {
+      "id": 1,
+      "phases": [
+        {"green_ticks": 10, "clearance_ticks": 0, "movements": [2]},
+        {"green_ticks": 1, "clearance_ticks": 1, "movements": [1]},
+        {"green_ticks": 4, "clearance_ticks": 0, "movements": [2]}
+      ]
+    },
+    {"id": 2, "phases": []},
+    {"id": 3, "phases": []}
+  ],
+  "traffic": [
+    {"lane": 1, "entry": {"private_cars": 3}, "ready_at": 1, "route": [1]},
+    {"lane": 1, "entry": {"vehicle": {"id": 12, "kind": "bus", "length_mm": 12000}}, "ready_at": 1, "route": [2]},
+    {"lane": 1, "entry": {"private_cars": 5}, "ready_at": 1, "route": [2, 4]}
+  ],
+  "demand": {
+    "zones": [
+      {"id": 1, "residents": 185, "jobs": 0, "shops": 0, "road_access": 1},
+      {"id": 2, "residents": 55, "jobs": 0, "shops": 55, "road_access": 7},
+      {"id": 3, "residents": 0, "jobs": 0, "shops": 0, "road_access": null},
+      {"id": 4, "residents": 0, "jobs": 0, "shops": 0, "road_access": null},
+      {"id": 5, "residents": 0, "jobs": 230, "shops": 0, "road_access": 4},
+      {"id": 6, "residents": 40, "jobs": 55, "shops": 30, "road_access": 5},
+      {"id": 7, "residents": 0, "jobs": 0, "shops": 0, "road_access": 8}
+    ],
+    "foot_edges": [
+      {"id": 1, "from": 1, "to": 2, "travel_ticks": 12, "capacity": 500, "discharge": 45, "signal": null},
+      {"id": 2, "from": 2, "to": 1, "travel_ticks": 12, "capacity": 500, "discharge": 45, "signal": null},
+      {"id": 3, "from": 1, "to": 3, "travel_ticks": 60, "capacity": 1400, "discharge": 60, "signal": 2},
+      {"id": 4, "from": 3, "to": 1, "travel_ticks": 60, "capacity": 1400, "discharge": 60, "signal": null},
+      {"id": 5, "from": 3, "to": 4, "travel_ticks": 2, "capacity": 400, "discharge": 55, "signal": null},
+      {"id": 6, "from": 4, "to": 3, "travel_ticks": 2, "capacity": 400, "discharge": 55, "signal": null},
+      {"id": 7, "from": 4, "to": 5, "travel_ticks": 85, "capacity": 1100, "discharge": 45, "signal": null},
+      {"id": 8, "from": 5, "to": 4, "travel_ticks": 85, "capacity": 1100, "discharge": 45, "signal": null},
+      {"id": 9, "from": 5, "to": 6, "travel_ticks": 13, "capacity": 500, "discharge": 45, "signal": null},
+      {"id": 10, "from": 6, "to": 5, "travel_ticks": 13, "capacity": 500, "discharge": 45, "signal": null},
+      {"id": 11, "from": 1, "to": 7, "travel_ticks": 8, "capacity": 300, "discharge": 35, "signal": null},
+      {"id": 12, "from": 7, "to": 1, "travel_ticks": 8, "capacity": 300, "discharge": 35, "signal": null}
+    ],
+    "profiles": [
+      {"purpose": "work", "departure_offsets": [0], "return_offset": 43200, "rate_numerator": 1, "rate_denominator": 2},
+      {"purpose": "shopping", "departure_offsets": [2500, 18000, 45000], "return_offset": 70000, "rate_numerator": 1, "rate_denominator": 10}
+    ],
+    "walk_weight": 5,
+    "car_weight": 2,
+    "transit_weight": 15,
+    "taxi_weight": 1,
+    "planning_window_ticks": 30
+  },
+  "service": {
+    "stops": [
+      {"id": 1, "zone": 1, "lane": 1, "capacity": 2500, "minimum_dwell": 2, "passengers_per_tick": 25},
+      {"id": 2, "zone": 3, "lane": 3, "capacity": 2500, "minimum_dwell": 2, "passengers_per_tick": 25},
+      {"id": 3, "zone": 4, "lane": 11, "capacity": 2500, "minimum_dwell": 2, "passengers_per_tick": 40},
+      {"id": 4, "zone": 5, "lane": 12, "capacity": 2500, "minimum_dwell": 2, "passengers_per_tick": 40},
+      {"id": 5, "zone": 5, "lane": 12, "capacity": 2500, "minimum_dwell": 2, "passengers_per_tick": 40},
+      {"id": 6, "zone": 4, "lane": 13, "capacity": 2500, "minimum_dwell": 2, "passengers_per_tick": 40},
+      {"id": 7, "zone": 3, "lane": 3, "capacity": 2500, "minimum_dwell": 2, "passengers_per_tick": 25},
+      {"id": 8, "zone": 1, "lane": 1, "capacity": 2500, "minimum_dwell": 2, "passengers_per_tick": 25}
+    ],
+    "lines": [
+      {"id": 1, "kind": "bus", "stops": [1, 2], "headway": 80, "first_departure": 3},
+      {"id": 2, "kind": "tram", "stops": [3, 4], "headway": 80, "first_departure": 44},
+      {"id": 3, "kind": "tram", "stops": [5, 6], "headway": 80, "first_departure": 72},
+      {"id": 4, "kind": "bus", "stops": [7, 8], "headway": 80, "first_departure": 62}
+    ],
+    "fleet": [
+      {"id": 13, "line": 1, "length_mm": 12000, "capacity": 52},
+      {"id": 14, "line": 4, "length_mm": 12000, "capacity": 52},
+      {"id": 21, "line": 2, "length_mm": 24000, "capacity": 88},
+      {"id": 22, "line": 3, "length_mm": 24000, "capacity": 88}
+    ]
+  },
+  "taxi": {
+    "fleet": [
+      {"id": 31, "start": 2, "length_mm": 5000, "capacity": 3},
+      {"id": 32, "start": 6, "length_mm": 5000, "capacity": 3}
+    ]
+  },
+  "layout": {
+    "tiles": [
+      {"cell": {"x": 0, "y": -2}, "terrain": "land"},
+      {"cell": {"x": 1, "y": -2}, "terrain": "land"},
+      {"cell": {"x": 2, "y": -2}, "terrain": "land"},
+      {"cell": {"x": 3, "y": -2}, "terrain": "land"},
+      {"cell": {"x": 4, "y": -2}, "terrain": "water"},
+      {"cell": {"x": 5, "y": -2}, "terrain": "land"},
+      {"cell": {"x": 6, "y": -2}, "terrain": "land"},
+      {"cell": {"x": 7, "y": -2}, "terrain": "land"},
+      {"cell": {"x": 8, "y": -2}, "terrain": "land"},
+      {"cell": {"x": 0, "y": -1}, "terrain": "land"},
+      {"cell": {"x": 1, "y": -1}, "terrain": "land"},
+      {"cell": {"x": 2, "y": -1}, "terrain": "land"},
+      {"cell": {"x": 3, "y": -1}, "terrain": "land"},
+      {"cell": {"x": 4, "y": -1}, "terrain": "water"},
+      {"cell": {"x": 5, "y": -1}, "terrain": "land"},
+      {"cell": {"x": 6, "y": -1}, "terrain": "land"},
+      {"cell": {"x": 7, "y": -1}, "terrain": "land"},
+      {"cell": {"x": 8, "y": -1}, "terrain": "land"},
+      {"cell": {"x": 0, "y": 0}, "terrain": "land"},
+      {"cell": {"x": 1, "y": 0}, "terrain": "land"},
+      {"cell": {"x": 2, "y": 0}, "terrain": "land"},
+      {"cell": {"x": 3, "y": 0}, "terrain": "land"},
+      {"cell": {"x": 4, "y": 0}, "terrain": "water"},
+      {"cell": {"x": 5, "y": 0}, "terrain": "land"},
+      {"cell": {"x": 6, "y": 0}, "terrain": "land"},
+      {"cell": {"x": 7, "y": 0}, "terrain": "land"},
+      {"cell": {"x": 8, "y": 0}, "terrain": "land"},
+      {"cell": {"x": 0, "y": 1}, "terrain": "land"},
+      {"cell": {"x": 1, "y": 1}, "terrain": "land"},
+      {"cell": {"x": 2, "y": 1}, "terrain": "land"},
+      {"cell": {"x": 3, "y": 1}, "terrain": "land"},
+      {"cell": {"x": 4, "y": 1}, "terrain": "water"},
+      {"cell": {"x": 5, "y": 1}, "terrain": "land"},
+      {"cell": {"x": 6, "y": 1}, "terrain": "land"},
+      {"cell": {"x": 7, "y": 1}, "terrain": "land"},
+      {"cell": {"x": 8, "y": 1}, "terrain": "land"},
+      {"cell": {"x": 0, "y": 2}, "terrain": "land"},
+      {"cell": {"x": 1, "y": 2}, "terrain": "land"},
+      {"cell": {"x": 2, "y": 2}, "terrain": "land"},
+      {"cell": {"x": 3, "y": 2}, "terrain": "land"},
+      {"cell": {"x": 4, "y": 2}, "terrain": "water"},
+      {"cell": {"x": 5, "y": 2}, "terrain": "land"},
+      {"cell": {"x": 6, "y": 2}, "terrain": "land"},
+      {"cell": {"x": 7, "y": 2}, "terrain": "land"},
+      {"cell": {"x": 8, "y": 2}, "terrain": "land"},
+      {"cell": {"x": 0, "y": 3}, "terrain": "land"},
+      {"cell": {"x": 1, "y": 3}, "terrain": "land"},
+      {"cell": {"x": 2, "y": 3}, "terrain": "land"},
+      {"cell": {"x": 3, "y": 3}, "terrain": "land"},
+      {"cell": {"x": 4, "y": 3}, "terrain": "water"},
+      {"cell": {"x": 5, "y": 3}, "terrain": "land"},
+      {"cell": {"x": 6, "y": 3}, "terrain": "land"},
+      {"cell": {"x": 7, "y": 3}, "terrain": "land"},
+      {"cell": {"x": 8, "y": 3}, "terrain": "land"}
+    ],
+    "buildings": [
+      {"id": 1, "zone": 1, "cell": {"x": 1, "y": 1}, "access": 1},
+      {"id": 2, "zone": 2, "cell": {"x": 2, "y": -1}, "access": 7},
+      {"id": 3, "zone": 3, "cell": {"x": 5, "y": 1}, "access": null},
+      {"id": 4, "zone": 4, "cell": {"x": 6, "y": 1}, "access": null},
+      {"id": 5, "zone": 5, "cell": {"x": 8, "y": 1}, "access": 4},
+      {"id": 6, "zone": 6, "cell": {"x": 7, "y": -1}, "access": 5}
+    ],
+    "streets": [
+      {
+        "lane": 1,
+        "cells": [
+          {"x": 0, "y": 0},
+          {"x": 1, "y": 0},
+          {"x": 2, "y": 0},
+          {"x": 3, "y": 0}
+        ],
+        "bridge": false,
+        "road_width_mm": 3500,
+        "foot_width_mm": 2000,
+        "greenery_width_mm": 500,
+        "width_mm": 6000,
+        "foot_edges": [1, 2]
+      },
+      {
+        "lane": 2,
+        "cells": [
+          {"x": 3, "y": 1},
+          {"x": 2, "y": 1}
+        ],
+        "bridge": false,
+        "road_width_mm": 3500,
+        "foot_width_mm": 2000,
+        "greenery_width_mm": 500,
+        "width_mm": 6000
+      },
+      {
+        "lane": 3,
+        "cells": [
+          {"x": 4, "y": 0},
+          {"x": 5, "y": 0}
+        ],
+        "bridge": true,
+        "road_width_mm": 3500,
+        "foot_width_mm": 2000,
+        "greenery_width_mm": 500,
+        "width_mm": 6000,
+        "foot_edges": [3, 4]
+      },
+      {
+        "lane": 4,
+        "cells": [
+          {"x": 6, "y": 0},
+          {"x": 7, "y": 0},
+          {"x": 8, "y": 0}
+        ],
+        "bridge": false,
+        "road_width_mm": 3500,
+        "foot_width_mm": 2000,
+        "greenery_width_mm": 500,
+        "width_mm": 6000,
+        "foot_edges": [9, 10]
+      },
+      {
+        "lane": 5,
+        "cells": [
+          {"x": 8, "y": 0},
+          {"x": 7, "y": 0},
+          {"x": 6, "y": 0},
+          {"x": 5, "y": 0}
+        ],
+        "bridge": false,
+        "road_width_mm": 3500,
+        "foot_width_mm": 2000,
+        "greenery_width_mm": 500,
+        "width_mm": 6000
+      },
+      {
+        "lane": 6,
+        "cells": [
+          {"x": 4, "y": 0},
+          {"x": 3, "y": 0}
+        ],
+        "bridge": true,
+        "road_width_mm": 3500,
+        "foot_width_mm": 2000,
+        "greenery_width_mm": 500,
+        "width_mm": 6000
+      },
+      {
+        "lane": 7,
+        "cells": [
+          {"x": 2, "y": 0},
+          {"x": 1, "y": 0},
+          {"x": 0, "y": 0}
+        ],
+        "bridge": false,
+        "road_width_mm": 3500,
+        "foot_width_mm": 2000,
+        "greenery_width_mm": 500,
+        "width_mm": 6000
+      },
+      {
+        "lane": 8,
+        "cells": [
+          {"x": 0, "y": -1}
+        ],
+        "bridge": false,
+        "road_width_mm": 3500,
+        "foot_width_mm": 2000,
+        "greenery_width_mm": 500,
+        "width_mm": 6000,
+        "foot_edges": [11, 12]
+      },
+      {
+        "lane": 11,
+        "cells": [
+          {"x": 5, "y": 2},
+          {"x": 6, "y": 2}
+        ],
+        "bridge": false,
+        "road_width_mm": 3000,
+        "foot_width_mm": 2000,
+        "greenery_width_mm": 500,
+        "width_mm": 6000,
+        "foot_edges": [5, 6]
+      },
+      {
+        "lane": 12,
+        "cells": [
+          {"x": 7, "y": 2},
+          {"x": 8, "y": 2}
+        ],
+        "bridge": false,
+        "road_width_mm": 3000,
+        "foot_width_mm": 2000,
+        "greenery_width_mm": 500,
+        "width_mm": 6000,
+        "foot_edges": [7, 8]
+      },
+      {
+        "lane": 13,
+        "cells": [
+          {"x": 8, "y": 2},
+          {"x": 7, "y": 2},
+          {"x": 6, "y": 2},
+          {"x": 5, "y": 2}
+        ],
+        "bridge": false,
+        "road_width_mm": 3000,
+        "foot_width_mm": 2000,
+        "greenery_width_mm": 500,
+        "width_mm": 6000
+      }
+    ]
+  },
+  "growth": {
+    "rules": {
+      "build_periods": 3,
+      "projects_per_period": 1,
+      "max_travel_ticks": 190,
+      "minimum_accessibility": 1
+    },
+    "sites": [
+      {"building": 7, "zone": 7, "cell": {"x": 0, "y": -2}, "access": 8, "usage": "housing", "amount": 24, "max_tiers": 2, "initial_tiers": 0, "local_road": null}
+    ]
+  }
+}

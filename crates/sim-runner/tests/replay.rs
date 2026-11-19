@@ -41,6 +41,32 @@ fn trace(path: &Path) -> Vec<Value> {
 }
 
 #[test]
+fn frozen_v1_save_resumes_the_bridge_queue() {
+    let fixture = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/save-v1.json"));
+    let checkpoint = summary(run(&[("--load", fixture.as_os_str())]));
+    assert_eq!(checkpoint["tick"], 10);
+    let approach = &checkpoint["lanes"][0];
+    assert_eq!(approach["id"], 1);
+    assert_eq!(approach["wait_reason"], "red_signal");
+    assert_eq!(approach["queue"][1]["vehicle"]["id"], 12);
+
+    let dir = tempfile::tempdir().unwrap();
+    let trace_path = dir.path().join("continuation.jsonl");
+    summary(run(&[
+        ("--load", fixture.as_os_str()),
+        ("--until-tick", "14".as_ref()),
+        ("--trace", trace_path.as_os_str()),
+    ]));
+    let rows = trace(&trace_path);
+    assert_eq!(rows.iter().map(|row| row["tick"].as_u64().unwrap()).collect::<Vec<_>>(), [11, 12, 13, 14]);
+    assert_eq!(rows[0]["lanes"][0]["departure"]["to"], 2);
+    assert!(rows[1]["lanes"][0]["departure"].is_null());
+    assert_eq!(rows[2]["lanes"][0]["departure"]["to"], 3);
+    assert_eq!(rows[2]["lanes"][0]["departure"]["entry"]["vehicle"]["id"], 12);
+    assert_eq!(rows[3]["lanes"][0]["departure"]["to"], 3);
+}
+
+#[test]
 fn restart_during_red_preserves_first_legal_crossing() {
     let dir = tempfile::tempdir().unwrap();
     let save = dir.path().join("checkpoint.json");
