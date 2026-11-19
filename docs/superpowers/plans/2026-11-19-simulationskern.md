@@ -65,10 +65,10 @@ Ein `CommandReceipt` enthält Tick, Eingabesequenz, betroffene IDs und fachliche
 
 **Dateien** `Cargo.toml`, `.gitignore`, `crates/sim-core/{Cargo.toml,src/{lib,ids,simulation,world,observe}.rs,tests/clock.rs}`.
 
-- [ ] Workspace und API-Grenze anlegen. Test `pause_and_single_step_preserve_boundary_order` mit Starttick 10, Gesamtpause, `advance(7)` → 10, `step()` → 11, Fortsetzen und `advance(3)` → 14. Weitere Tests erwarten eine ID samt Feld für doppelte IDs und einen Fehler vor Überlauf der Tickgrenze.
-- [ ] `cargo test -p sim-core --test clock` ausführen und die fachliche Abweichung prüfen.
-- [ ] `Simulation::new_game`, `apply`, `step`, `advance` und `inspect` für Takt, Validierung, Pausen und Eingabereihenfolge implementieren. Als interne Zustände getrennte Verkehrs- und Entwicklungsuhren führen.
-- [ ] Einzeltest und Workspace-Prüfungen wiederholen. Commit `feat: Simulationszeit und Weltvalidierung`.
+- [x] Workspace und API-Grenze anlegen. Test `pause_and_single_step_preserve_boundary_order` mit Starttick 10, Gesamtpause, `advance(7)` → 10, `step()` → 11, Fortsetzen und `advance(3)` → 14. Weitere Tests erwarten eine ID samt Feld für doppelte IDs und einen Fehler vor Überlauf der Tickgrenze.
+- [x] `cargo test -p sim-core --test clock` ausführen und die fachliche Abweichung prüfen.
+- [x] `Simulation::new_game`, `apply`, `step`, `advance` und `inspect` für Takt, Validierung, Pausen und Eingabereihenfolge implementieren. Als interne Zustände getrennte Verkehrs- und Entwicklungsuhren führen.
+- [x] Einzeltest und Workspace-Prüfungen wiederholen. Commit `feat: Simulationszeit und Weltvalidierung`.
 
 ### 2. Geordnete Spuren und Kreuzungen
 
