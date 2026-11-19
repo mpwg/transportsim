@@ -5,7 +5,7 @@ use crate::{
 use std::{collections::BTreeSet, fmt, num::NonZeroU64};
 
 /// Initial conditions supplied by a scenario author.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Scenario {
     pub start: Tick,

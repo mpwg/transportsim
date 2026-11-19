@@ -4,7 +4,8 @@ use crate::Tick;
 use crate::network::{JunctionId, LaneId, MovementId};
 
 /// A green interval for the listed movements followed by an all-red interval.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SignalPhase {
     pub green_ticks: NonZeroU32,
     pub clearance_ticks: u32,
@@ -18,7 +19,8 @@ impl SignalPhase {
 }
 
 /// A junction's ordered, repeating signal plan. An empty plan is unsignalized.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct JunctionSpec {
     pub id: JunctionId,
     pub phases: Vec<SignalPhase>,

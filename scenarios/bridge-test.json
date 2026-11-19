@@ -1,0 +1,53 @@
+{
+  "seed": 4,
+  "start": 0,
+  "development_period_ticks": 60,
+  "building_ids": [],
+  "lanes": [
+    {
+      "id": 1,
+      "capacity_mm": 60000,
+      "travel_ticks": 1,
+      "discharge": {"millimetres": 30000, "ticks": 1},
+      "allowed": ["car", "bus"]
+    },
+    {
+      "id": 2,
+      "capacity_mm": 60000,
+      "travel_ticks": 1,
+      "discharge": {"millimetres": 30000, "ticks": 1},
+      "allowed": ["car", "bus"]
+    },
+    {
+      "id": 3,
+      "capacity_mm": 60000,
+      "travel_ticks": 1,
+      "discharge": {"millimetres": 30000, "ticks": 1},
+      "allowed": ["car", "bus"]
+    }
+  ],
+  "movements": [
+    {"id": 1, "from": 1, "to": 2, "junction": 1, "conflict_zones": [1], "priority": 0},
+    {"id": 2, "from": 1, "to": 3, "junction": 1, "conflict_zones": [1], "priority": 0}
+  ],
+  "junctions": [
+    {
+      "id": 1,
+      "phases": [
+        {"green_ticks": 10, "clearance_ticks": 0, "movements": [2]},
+        {"green_ticks": 1, "clearance_ticks": 1, "movements": [1]},
+        {"green_ticks": 5, "clearance_ticks": 0, "movements": [2]}
+      ]
+    }
+  ],
+  "traffic": [
+    {"lane": 1, "entry": {"private_cars": 3}, "ready_at": 1, "route": [1]},
+    {
+      "lane": 1,
+      "entry": {"vehicle": {"id": 12, "kind": "bus", "length_mm": 12000}},
+      "ready_at": 1,
+      "route": [2]
+    },
+    {"lane": 1, "entry": {"private_cars": 5}, "ready_at": 1, "route": [2]}
+  ]
+}

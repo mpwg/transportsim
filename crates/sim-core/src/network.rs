@@ -2,7 +2,8 @@ use std::{fmt, num::NonZeroU32};
 
 macro_rules! id {
     ($name:ident) => {
-        #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+        #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize)]
+        #[serde(transparent)]
         pub struct $name(u64);
         impl $name {
             pub const fn new(value: u64) -> Self {
@@ -20,7 +21,8 @@ id!(MovementId);
 id!(JunctionId);
 id!(VehicleId);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum VehicleKind {
     Car,
     Bus,
@@ -28,14 +30,16 @@ pub enum VehicleKind {
     Tram,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DischargeRate {
     pub millimetres: NonZeroU32,
     pub ticks: NonZeroU32,
 }
 
 /// The capacity includes the lengths and standing gaps of queued vehicles.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LaneSpec {
     pub id: LaneId,
     pub capacity_mm: NonZeroU32,
@@ -45,7 +49,8 @@ pub struct LaneSpec {
 }
 
 /// Conflict zones are local to a junction. Greater priority is served first.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct MovementSpec {
     pub id: MovementId,
     pub from: LaneId,

@@ -1,9 +1,10 @@
-use crate::Tick;
 use crate::junction::{JunctionSpec, JunctionState};
 use crate::network::{
     JunctionId, LaneId, LaneSpec, MovementId, MovementSpec, RoadValidationError, VehicleId,
     VehicleKind,
 };
+use crate::save::v1::{JunctionV1, LaneV1, QueueItemV1};
+use crate::{LoadError, Tick, ValidationError};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroU32;
@@ -11,7 +12,8 @@ use std::num::NonZeroU32;
 const CAR_SPACE_MM: u32 = 5_000;
 
 /// A private traffic batch or one indivisible deployed vehicle.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum QueueEntry {
     PrivateCars(NonZeroU32),
     Vehicle {
@@ -52,7 +54,8 @@ impl QueueEntry {
 }
 
 /// Initial physical occupancy in scenario order on each lane.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrafficSeed {
     pub lane: LaneId,
     pub entry: QueueEntry,
@@ -60,14 +63,25 @@ pub struct TrafficSeed {
     pub route: Vec<MovementId>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[non_exhaustive]
+#[serde(rename_all = "snake_case")]
 pub enum WaitReason {
     TravelTime,
     RedSignal,
     DischargeLimit,
     TargetFull,
     Conflict,
+}
+
+/// Traffic that cleared the lane on the most recent tick.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct LaneDeparture {
+    pub entry: QueueEntry,
+    /// The next lane, or the end of the route if absent.
+    pub to: Option<LaneId>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -78,6 +92,7 @@ pub struct LaneObservation {
     pub occupied_mm: u32,
     pub queue: Vec<QueueEntry>,
     pub wait_reason: Option<WaitReason>,
+    pub departure: Option<LaneDeparture>,
 }
 
 #[derive(Debug)]
@@ -94,6 +109,7 @@ struct LaneState {
     credit: u64,
     queue: VecDeque<QueueItem>,
     wait: Option<WaitReason>,
+    departure: Option<LaneDeparture>,
 }
 
 #[derive(Debug)]
@@ -138,6 +154,7 @@ impl RoadState {
                 credit: 0,
                 queue: VecDeque::new(),
                 wait: None,
+                departure: None,
             };
             if road.lanes.insert(id, state).is_some() {
                 return Err(RoadValidationError::DuplicateLane(id));
@@ -216,9 +233,24 @@ impl RoadState {
     }
 
     fn seed(&mut self, seed: TrafficSeed) -> Result<(), RoadValidationError> {
-        let mut lane_id = seed.lane;
-        self.validate_lane(lane_id, &seed.entry)?;
-        for &id in &seed.route {
+        self.push_queue_item(
+            seed.lane,
+            QueueItem {
+                entry: seed.entry,
+                ready_at: Some(seed.ready_at),
+                route: seed.route.into(),
+            },
+        )
+    }
+
+    fn push_queue_item(
+        &mut self,
+        start: LaneId,
+        item: QueueItem,
+    ) -> Result<(), RoadValidationError> {
+        let mut lane_id = start;
+        self.validate_lane(lane_id, &item.entry)?;
+        for &id in &item.route {
             let movement = self
                 .movements
                 .get(&id)
@@ -228,20 +260,16 @@ impl RoadState {
                     movement: id,
                 })?;
             lane_id = movement.to;
-            self.validate_lane(lane_id, &seed.entry)?;
+            self.validate_lane(lane_id, &item.entry)?;
         }
-        let lane = self.lanes.get_mut(&seed.lane).expect("validated seed lane");
+        let lane = self.lanes.get_mut(&start).expect("validated queue lane");
         let occupied = u64::from(lane.occupied_mm)
-            + u64::from(seed.entry.units()) * u64::from(seed.entry.unit_space());
+            + u64::from(item.entry.units()) * u64::from(item.entry.unit_space());
         if occupied > u64::from(lane.spec.capacity_mm.get()) {
-            return Err(RoadValidationError::OverCapacity(seed.lane));
+            return Err(RoadValidationError::OverCapacity(start));
         }
         lane.occupied_mm = occupied as u32;
-        lane.queue.push_back(QueueItem {
-            entry: seed.entry,
-            ready_at: Some(seed.ready_at),
-            route: seed.route.into(),
-        });
+        lane.queue.push_back(item);
         Ok(())
     }
 
@@ -260,6 +288,155 @@ impl RoadState {
         Ok(())
     }
 
+    pub(crate) fn lane_ids(&self) -> impl Iterator<Item = LaneId> + '_ {
+        self.lanes.keys().copied()
+    }
+
+    pub(crate) fn snapshot(&self) -> (Vec<LaneV1>, Vec<JunctionV1>) {
+        let lanes = self
+            .lanes
+            .iter()
+            .map(|(&id, lane)| LaneV1 {
+                id,
+                credit: lane.credit,
+                wait: lane.wait,
+                departure: lane.departure.clone(),
+                queue: lane
+                    .queue
+                    .iter()
+                    .map(|item| QueueItemV1 {
+                        entry: item.entry.clone(),
+                        ready_at: item.ready_at,
+                        route: item.route.iter().copied().collect(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        let junctions = self
+            .junctions
+            .iter()
+            .map(|(&id, junction)| JunctionV1 {
+                id,
+                last_granted: junction
+                    .last_granted
+                    .iter()
+                    .map(|(&priority, &lane)| (priority, lane))
+                    .collect(),
+            })
+            .collect();
+        (lanes, junctions)
+    }
+
+    // Used only to construct a new simulation from a save. The running instance
+    // is kept by the caller until this entire restoration succeeds.
+    pub(crate) fn restore(
+        &mut self,
+        tick: Tick,
+        lanes: Vec<LaneV1>,
+        junctions: Vec<JunctionV1>,
+    ) -> Result<(), LoadError> {
+        if lanes.len() != self.lanes.len() {
+            return Err(LoadError::InvalidState { field: "lanes" });
+        }
+        if junctions.len() != self.junctions.len() {
+            return Err(LoadError::InvalidState { field: "junctions" });
+        }
+        for lane in self.lanes.values_mut() {
+            lane.queue.clear();
+            lane.occupied_mm = 0;
+        }
+        let mut seen = BTreeSet::new();
+        let mut vehicles = BTreeSet::new();
+        let road_error = |error| LoadError::State(ValidationError::Road(error));
+        for saved in lanes {
+            let lane = self
+                .lanes
+                .get_mut(&saved.id)
+                .filter(|_| seen.insert(saved.id))
+                .ok_or(LoadError::InvalidState { field: "lanes.id" })?;
+            let credit_limit = u64::from(lane.spec.capacity_mm.get())
+                * u64::from(lane.spec.discharge.ticks.get())
+                + u64::from(lane.spec.discharge.millimetres.get())
+                - 1;
+            if saved.credit > credit_limit {
+                return Err(LoadError::InvalidState {
+                    field: "lanes.credit",
+                });
+            }
+            let can_exceed_clock = tick
+                .seconds()
+                .checked_add(u64::from(lane.spec.travel_ticks.get()))
+                .is_none();
+            lane.credit = saved.credit;
+            lane.wait = saved.wait;
+            lane.departure = saved.departure;
+            if let Some(departure) = &lane.departure {
+                let span =
+                    u64::from(departure.entry.units()) * u64::from(departure.entry.unit_space());
+                if span > u64::from(lane.spec.capacity_mm.get())
+                    || !lane.spec.allowed.contains(&departure.entry.kind())
+                    || departure.to.is_some_and(|to| {
+                        !self
+                            .movements
+                            .values()
+                            .any(|movement| movement.from == saved.id && movement.to == to)
+                    })
+                {
+                    return Err(LoadError::InvalidState {
+                        field: "lanes.departure",
+                    });
+                }
+            }
+            for item in saved.queue {
+                if item.ready_at.is_none() && !can_exceed_clock {
+                    return Err(LoadError::InvalidState {
+                        field: "lanes.queue.ready_at",
+                    });
+                }
+                if let QueueEntry::Vehicle { id, .. } = item.entry
+                    && !vehicles.insert(id)
+                {
+                    return Err(road_error(RoadValidationError::DuplicateVehicle(id)));
+                }
+                self.push_queue_item(
+                    saved.id,
+                    QueueItem {
+                        entry: item.entry,
+                        ready_at: item.ready_at,
+                        route: item.route.into(),
+                    },
+                )
+                .map_err(road_error)?;
+            }
+        }
+
+        let valid_grants: BTreeSet<_> = self
+            .movements
+            .values()
+            .map(|movement| (movement.junction, movement.priority, movement.from))
+            .collect();
+        let mut seen = BTreeSet::new();
+        for saved in junctions {
+            let junction = self
+                .junctions
+                .get_mut(&saved.id)
+                .filter(|_| seen.insert(saved.id))
+                .ok_or(LoadError::InvalidState {
+                    field: "junctions.id",
+                })?;
+            for (priority, lane) in saved.last_granted {
+                if !valid_grants.contains(&(saved.id, priority, lane))
+                    || junction.last_granted.insert(priority, lane).is_some()
+                {
+                    return Err(LoadError::InvalidState {
+                        field: "junctions.last_granted",
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn observe(&self, id: LaneId, tick: Tick) -> Option<LaneObservation> {
         let lane = self.lanes.get(&id)?;
         Some(LaneObservation {
@@ -268,6 +445,7 @@ impl RoadState {
             occupied_mm: lane.occupied_mm,
             queue: lane.queue.iter().map(|item| item.entry.clone()).collect(),
             wait_reason: lane.wait,
+            departure: lane.departure.clone(),
         })
     }
 
@@ -281,6 +459,7 @@ impl RoadState {
         let mut requests = Vec::new();
         for (&from, lane) in &mut self.lanes {
             lane.wait = None;
+            lane.departure = None;
             let Some(head) = lane.queue.front() else {
                 lane.credit = 0;
                 continue;
@@ -391,6 +570,10 @@ impl RoadState {
             lane.credit -=
                 u64::from(movement.space_mm) * u64::from(lane.spec.discharge.ticks.get());
             let entry = head.entry.first_units(movement.units);
+            lane.departure = Some(LaneDeparture {
+                entry: entry.clone(),
+                to: movement.to,
+            });
             if let Some(remaining) = NonZeroU32::new(head.entry.units() - movement.units.get()) {
                 lane.queue.push_front(QueueItem {
                     entry: QueueEntry::PrivateCars(remaining),

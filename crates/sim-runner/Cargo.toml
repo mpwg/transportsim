@@ -1,0 +1,14 @@
+[package]
+name = "sim-runner"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+same-file = "1"
+sim-core = { path = "../sim-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"

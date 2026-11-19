@@ -1,5 +1,8 @@
 /// A boundary on the traffic clock, in simulated seconds.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
+)]
+#[serde(transparent)]
 pub struct Tick(u64);
 
 impl Tick {
@@ -13,7 +16,10 @@ impl Tick {
 }
 
 /// A stable identity for a building.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
+)]
+#[serde(transparent)]
 pub struct BuildingId(u64);
 
 impl BuildingId {

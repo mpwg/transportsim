@@ -65,26 +65,30 @@ pub struct AdvanceReport {
 /// Exclusive owner of a running simulation.
 #[derive(Debug)]
 pub struct Simulation {
-    world: World,
-    rules: RuleSet,
-    traffic: Tick,
-    development_ticks: u64,
-    sequence: u64,
-    paused: bool,
-    growth_paused: bool,
+    pub(crate) world: World,
+    pub(crate) rules: RuleSet,
+    pub(crate) traffic: Tick,
+    pub(crate) development_ticks: u64,
+    pub(crate) sequence: u64,
+    pub(crate) paused: bool,
+    pub(crate) growth_paused: bool,
+    pub(crate) scenario: Scenario,
+    pub(crate) seed: u64,
 }
 
 impl Simulation {
-    /// Validates and starts a scenario. The seed is reserved for stochastic phases.
+    /// Validates and starts a scenario with deterministic initial conditions.
     pub fn new_game(
         scenario: Scenario,
         rules: RuleSet,
-        _seed: u64,
+        seed: u64,
     ) -> Result<Self, ValidationError> {
         let traffic = scenario.start;
-        let world = World::from_scenario(scenario)?;
+        let world = World::from_scenario(scenario.clone())?;
         Ok(Self {
             world,
+            scenario,
+            seed,
             rules,
             traffic,
             development_ticks: 0,
@@ -147,6 +151,11 @@ impl Simulation {
             end,
             executed_ticks: ticks,
         })
+    }
+
+    /// Iterates through existing lane IDs in stable order.
+    pub fn lane_ids(&self) -> impl Iterator<Item = crate::LaneId> + '_ {
+        self.world.road.lane_ids()
     }
 
     pub fn inspect(&self, query: Query) -> Result<Observation, QueryError> {
