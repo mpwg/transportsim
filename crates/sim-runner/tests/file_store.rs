@@ -3,9 +3,6 @@ mod file_store;
 
 use std::fs::{self, File};
 use std::io::{self, Write};
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::thread;
-use std::time::Duration;
 
 use file_store::{FileStore, Operation, StoreError, StorePhase};
 use sim_core::{RuleSet, Scenario, Simulation, Tick};
@@ -150,6 +147,9 @@ fn filename_can_use_all_255_bytes() {
 #[test]
 fn writers_using_a_parent_alias_are_serialized() {
     use std::os::unix::fs::symlink;
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::thread;
+    use std::time::Duration;
 
     let [old, new] = checkpoints();
     let new = new.as_slice();
@@ -163,14 +163,14 @@ fn writers_using_a_parent_alias_are_serialized() {
     let aliased_path = alias.join("checkpoint.json");
     fs::write(&path, &old).unwrap();
 
-    let (first_ready, first_wait) = mpsc::channel();
-    let (first_resume, first_paused) = mpsc::channel();
-    let (second_start, second_started) = mpsc::channel();
-    let (second_ready, second_wait) = mpsc::channel();
     thread::scope(|scope| {
+        let (first_ready, first_wait) = mpsc::channel();
+        let (first_resume, first_paused) = mpsc::channel();
+        let (second_start, second_started) = mpsc::channel();
+        let (second_ready, second_wait) = mpsc::channel();
         let first = scope.spawn(move || {
             FileStore.write_with(&path, new, |operation| {
-                if let Operation::SyncFile(_) = operation {
+                if let Operation::SyncDirectory(_) = operation {
                     first_ready.send(()).unwrap();
                     first_paused.recv().unwrap();
                 }
@@ -178,28 +178,28 @@ fn writers_using_a_parent_alias_are_serialized() {
             })
         });
         first_wait.recv_timeout(Duration::from_secs(5)).unwrap();
-        let second = scope.spawn(|| {
+        let alias = &aliased_path;
+        let old = old.as_slice();
+        let second = scope.spawn(move || {
             second_start.send(()).unwrap();
-            FileStore.write_with(&aliased_path, &old, |operation| {
+            FileStore.write_with(alias, old, |operation| {
                 if let Operation::Write(_, _) = operation {
-                    second_ready
-                        .send(FileStore.read(&aliased_path).unwrap())
-                        .unwrap();
+                    second_ready.send(FileStore.read(alias).unwrap()).unwrap();
                 }
                 operation.perform()
             })
         });
         let started = second_started.recv_timeout(Duration::from_secs(5));
         let blocked = second_wait.recv_timeout(Duration::from_millis(50));
-        let visible = FileStore.read(&aliased_path);
+        let visible = FileStore.read(alias);
         first_resume.send(()).unwrap();
         first.join().unwrap().unwrap();
         second.join().unwrap().unwrap();
         assert_eq!(started, Ok(()));
         assert_eq!(blocked, Err(RecvTimeoutError::Timeout));
-        assert_checkpoint(&visible.unwrap(), &old);
+        assert_checkpoint(&visible.unwrap(), new);
         assert_checkpoint(&second_wait.recv().unwrap(), new);
-        assert_checkpoint(&FileStore.read(&aliased_path).unwrap(), &old);
+        assert_checkpoint(&FileStore.read(alias).unwrap(), old);
     });
 }
 
