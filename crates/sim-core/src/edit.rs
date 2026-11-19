@@ -7,8 +7,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    FootEdgeId, FootEdgeSpec, JunctionSpec, LaneId, LaneSpec, LineId, LoadError, MovementId,
-    MovementSpec, Scenario, Simulation, ValidationError,
+    BuildingId, Cell, FootEdgeId, FootEdgeSpec, JunctionSpec, LaneId, LaneSpec, LineId, LoadError,
+    MovementId, MovementSpec, Scenario, Simulation, StreetSite, ValidationError,
     demand::DemandSnapshot,
     save::v1::{CarRecoveryV1, JunctionV1, LaneV1},
     world::World,
@@ -38,6 +38,17 @@ pub enum EditAction {
     SetSignal(JunctionSpec),
     UpsertFootEdge(FootEdgeSpec),
     RemoveFootEdge(FootEdgeId),
+    MoveBuilding {
+        building: BuildingId,
+        target: Cell,
+    },
+    UpsertStreet(StreetSite),
+    SetStreetWidths {
+        lane: LaneId,
+        road_width_mm: u32,
+        foot_width_mm: u32,
+        greenery_width_mm: u32,
+    },
     AddTurnPocket(TurnPocket),
     SetHeadway {
         line: LineId,
@@ -60,6 +71,7 @@ pub struct EditPreview {
     pub revision: u64,
     pub affected_lanes: Vec<LaneId>,
     pub affected_foot_edges: Vec<FootEdgeId>,
+    pub affected_buildings: Vec<BuildingId>,
     pub relocated_vehicles: u64,
     pub rerouted_vehicles: u64,
     pub blocked_vehicles: u64,
@@ -75,6 +87,7 @@ pub enum EditError {
     MissingLane(LaneId),
     MissingMovement(MovementId),
     MissingFootEdge(FootEdgeId),
+    MissingStreet(LaneId),
     MissingLine(LineId),
     Occupied(LaneId),
     InvalidPocket(LaneId),
@@ -91,6 +104,7 @@ impl fmt::Display for EditError {
             Self::RevisionOverflow => out.write_str("network revision overflow"),
             Self::Empty => out.write_str("edit has no actions"),
             Self::MissingLane(lane) => write!(out, "unknown lane {}", lane.get()),
+            Self::MissingStreet(id) => write!(out, "no street profile for lane {}", id.get()),
             Self::MissingFootEdge(id) => write!(out, "unknown foot edge {}", id.get()),
             Self::MissingMovement(id) => write!(out, "unknown movement {}", id.get()),
             Self::MissingLine(id) => write!(out, "unknown line {}", id.get()),
@@ -136,6 +150,7 @@ struct Draft {
     demand: Option<DemandSnapshot>,
     affected: BTreeSet<LaneId>,
     affected_foot_edges: BTreeSet<FootEdgeId>,
+    affected_buildings: BTreeSet<BuildingId>,
     relocated_vehicles: u64,
     headways: BTreeMap<LineId, NonZeroU32>,
 }
@@ -153,6 +168,7 @@ impl Draft {
             demand: simulation.world.demand.snapshot(),
             affected: BTreeSet::new(),
             affected_foot_edges: BTreeSet::new(),
+            affected_buildings: BTreeSet::new(),
             relocated_vehicles: 0,
             headways: BTreeMap::new(),
         }
@@ -195,6 +211,10 @@ impl Draft {
                 }
                 self.lanes.remove(index);
                 self.scenario.lanes.retain(|lane| lane.id != *id);
+                self.scenario
+                    .layout
+                    .streets
+                    .retain(|street| street.lane != *id);
                 self.affected.insert(*id);
             }
             EditAction::UpsertMovement(movement) => {
@@ -260,7 +280,36 @@ impl Draft {
                     .position(|edge| edge.id == *id)
                     .ok_or(EditError::MissingFootEdge(*id))?;
                 edges.remove(index);
+                for street in &mut self.scenario.layout.streets {
+                    street.foot_edges.retain(|&edge| edge != *id);
+                }
                 self.affected_foot_edges.insert(*id);
+            }
+            EditAction::MoveBuilding { building, target } => {
+                self.scenario
+                    .layout
+                    .move_building(*building, *target)
+                    .map_err(|error| {
+                        EditError::WouldInvalidate(LoadError::State(ValidationError::Layout(error)))
+                    })?;
+                self.affected_buildings.insert(*building);
+            }
+            EditAction::UpsertStreet(street) => {
+                let streets = &mut self.scenario.layout.streets;
+                if let Some(previous) = streets.iter_mut().find(|old| old.lane == street.lane) {
+                    *previous = street.clone();
+                } else {
+                    streets.push(street.clone());
+                }
+                self.affected.insert(street.lane);
+            }
+            EditAction::SetStreetWidths {
+                lane,
+                road_width_mm,
+                foot_width_mm,
+                greenery_width_mm,
+            } => {
+                self.set_street_widths(*lane, *road_width_mm, *foot_width_mm, *greenery_width_mm)?;
             }
             EditAction::AddTurnPocket(pocket) => self.pocket(pocket, tick)?,
             EditAction::SetHeadway { line, ticks } => {
@@ -276,6 +325,42 @@ impl Draft {
                 self.headways.insert(*line, *ticks);
             }
         }
+        Ok(())
+    }
+
+    fn set_street_widths(
+        &mut self,
+        lane: LaneId,
+        road_width_mm: u32,
+        foot_width_mm: u32,
+        greenery_width_mm: u32,
+    ) -> Result<(), EditError> {
+        let street = self
+            .scenario
+            .layout
+            .streets
+            .iter_mut()
+            .find(|street| street.lane == lane)
+            .ok_or(EditError::MissingStreet(lane))?;
+        street.road_width_mm = road_width_mm;
+        street.greenery_width_mm = greenery_width_mm;
+        if street.foot_width_mm != foot_width_mm {
+            street.foot_width_mm = foot_width_mm;
+            if let Some(discharge) = NonZeroU32::new(foot_width_mm.div_ceil(1_000)) {
+                for &id in &street.foot_edges {
+                    let edge = self
+                        .scenario
+                        .demand
+                        .foot_edges
+                        .iter_mut()
+                        .find(|edge| edge.id == id)
+                        .ok_or(EditError::MissingFootEdge(id))?;
+                    edge.discharge = discharge;
+                    self.affected_foot_edges.insert(id);
+                }
+            }
+        }
+        self.affected.insert(lane);
         Ok(())
     }
 
@@ -480,6 +565,7 @@ impl Draft {
     }
 
     fn finish(mut self, sim: &Simulation, revision: u64) -> Result<PreparedEdit, EditError> {
+        self.scenario.layout.sort_tables();
         let mut world =
             World::from_scenario(self.scenario.clone()).map_err(|error: ValidationError| {
                 EditError::WouldInvalidate(LoadError::State(error))
@@ -515,6 +601,7 @@ impl Draft {
                 revision,
                 affected_lanes: self.affected.into_iter().collect(),
                 affected_foot_edges: self.affected_foot_edges.into_iter().collect(),
+                affected_buildings: self.affected_buildings.into_iter().collect(),
                 relocated_vehicles: self.relocated_vehicles,
                 rerouted_vehicles: changes.rerouted,
                 blocked_vehicles: changes.blocked,

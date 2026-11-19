@@ -3,6 +3,7 @@ use crate::{
     BuildingId, JunctionSpec, LaneSpec, MovementSpec, RoadValidationError, Tick, TrafficSeed,
 };
 use crate::{DemandError, DemandSpec, demand::DemandState, traffic::RoadState};
+use crate::{LayoutError, LayoutSpec};
 use crate::{QueueEntry, ServiceError, ServiceSpec, service::Service};
 use std::{collections::BTreeSet, fmt, num::NonZeroU64};
 
@@ -19,6 +20,7 @@ pub struct Scenario {
     pub demand: DemandSpec,
     pub service: ServiceSpec,
     pub taxi: TaxiSpec,
+    pub layout: LayoutSpec,
 }
 
 impl Scenario {
@@ -33,6 +35,7 @@ impl Scenario {
             demand: DemandSpec::default(),
             service: ServiceSpec::default(),
             taxi: TaxiSpec::default(),
+            layout: LayoutSpec::default(),
         }
     }
 }
@@ -69,6 +72,7 @@ pub enum ValidationError {
     Demand(DemandError),
     Service(ServiceError),
     Taxi(TaxiError),
+    Layout(LayoutError),
 }
 
 impl fmt::Display for ValidationError {
@@ -78,6 +82,7 @@ impl fmt::Display for ValidationError {
             Self::Demand(error) => error.fmt(out),
             Self::Service(error) => error.fmt(out),
             Self::Taxi(error) => error.fmt(out),
+            Self::Layout(error) => error.fmt(out),
             Self::DuplicateBuildingId { id, index } => {
                 write!(
                     out,
@@ -116,6 +121,23 @@ impl World {
                 QueueEntry::PrivateCars(_) => None,
             })
             .collect();
+        let lanes: BTreeSet<_> = scenario.lanes.iter().map(|lane| lane.id).collect();
+        let zones: BTreeSet<_> = scenario.demand.zones.iter().map(|zone| zone.id).collect();
+        let feet: BTreeSet<_> = scenario
+            .demand
+            .foot_edges
+            .iter()
+            .map(|edge| edge.id)
+            .collect();
+        scenario
+            .layout
+            .validate(|id| lanes.contains(&id), |id| zones.contains(&id))
+            .map_err(ValidationError::Layout)?;
+        scenario
+            .layout
+            .validate_connections(&scenario.movements, |id| feet.contains(&id))
+            .map_err(ValidationError::Layout)?;
+        buildings.extend(scenario.layout.buildings.iter().map(|building| building.id));
         let road = RoadState::new(
             scenario.lanes,
             scenario.movements,

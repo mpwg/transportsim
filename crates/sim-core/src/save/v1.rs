@@ -1,3 +1,4 @@
+use crate::LayoutSpec;
 use crate::taxi::{TaxiSnapshot, TaxiSpec};
 use std::num::NonZeroU64;
 
@@ -27,6 +28,8 @@ pub(super) struct ScenarioV1 {
     service: ServiceSpec,
     #[serde(default, skip_serializing_if = "TaxiSpec::is_empty")]
     taxi: TaxiSpec,
+    #[serde(default, skip_serializing_if = "LayoutSpec::is_empty")]
+    layout: LayoutSpec,
 }
 
 impl ScenarioV1 {
@@ -41,6 +44,7 @@ impl ScenarioV1 {
             mut demand,
             mut service,
             mut taxi,
+            mut layout,
         } = sim.scenario.clone();
         building_ids.sort_unstable();
         lanes.sort_unstable_by_key(|lane| lane.id);
@@ -50,6 +54,7 @@ impl ScenarioV1 {
         demand.sort_tables();
         service.sort_tables();
         taxi.sort_tables();
+        layout.sort_tables();
         Self {
             seed: sim.seed,
             start,
@@ -63,6 +68,7 @@ impl ScenarioV1 {
             demand,
             service,
             taxi,
+            layout,
         }
     }
 
@@ -77,6 +83,7 @@ impl ScenarioV1 {
             demand: self.demand,
             service: self.service,
             taxi: self.taxi,
+            layout: self.layout,
         };
         Simulation::new_game(
             scenario,

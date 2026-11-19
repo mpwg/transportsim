@@ -405,3 +405,121 @@ fn an_offroad_waiter_replans_when_a_foot_connection_is_built() {
     assert_eq!(demand(&resumed).arrived, 1);
     assert_eq!(demand(&resumed).generated, 1);
 }
+
+#[test]
+fn moving_building_retains_identity_demand_and_access_and_rejects_water() {
+    use sim_core::{
+        BuildingId, BuildingSite, Cell, LayoutError, RuleSet, Terrain, TileSpec, ZoneId,
+    };
+    let mut spec = commute_scenario();
+    let home = BuildingId::new(42);
+    let cell = |x| Cell { x, y: 0 };
+    spec.layout.tiles = [Terrain::Land, Terrain::Land, Terrain::Water]
+        .into_iter()
+        .enumerate()
+        .map(|(x, terrain)| TileSpec {
+            cell: cell(x as i32),
+            terrain,
+        })
+        .collect();
+    let building = BuildingSite {
+        id: home,
+        zone: ZoneId::new(1),
+        cell: cell(0),
+        access: Some(LaneId::new(1)),
+    };
+    spec.layout.buildings.push(building.clone());
+    let mut sim = Simulation::new_game(spec, RuleSet::default(), 42).unwrap();
+    let on_water = EditCommand {
+        expected_revision: 0,
+        actions: vec![EditAction::MoveBuilding {
+            building: home,
+            target: cell(2),
+        }],
+    };
+    let before = sim.fingerprint().unwrap();
+    assert!(matches!(sim.preview(&on_water),
+        Err(EditError::WouldInvalidate(sim_core::LoadError::State(sim_core::ValidationError::Layout(
+            LayoutError::BuildingOnWater { building: id, .. }
+        )))) if id == home
+    ));
+    assert_eq!(before, sim.fingerprint().unwrap());
+    sim.apply(Command::CommitEdit(EditCommand {
+        expected_revision: 0,
+        actions: vec![EditAction::MoveBuilding {
+            building: home,
+            target: cell(1),
+        }],
+    }))
+    .unwrap();
+    let mut loaded = Simulation::load(&sim.save().unwrap()).unwrap();
+    let Observation::Layout(layout) = loaded.inspect(Query::Layout).unwrap() else {
+        panic!("layout");
+    };
+    assert_eq!(
+        layout.buildings,
+        [BuildingSite {
+            cell: cell(1),
+            ..building
+        }]
+    );
+    assert_eq!(
+        loaded.inspect(Query::Building(home)).unwrap(),
+        Observation::Building(home)
+    );
+    loaded.advance(7).unwrap();
+    assert_eq!(demand(&loaded).arrived, 1);
+}
+
+#[test]
+fn enlarging_a_sidewalk_affects_link_discharge_and_uses_street_width() {
+    use sim_core::{
+        Cell, FootEdgeId, FootEdgeSpec, RuleSet, StreetSite, Terrain, TileSpec, ZoneId,
+    };
+    let mut spec = commute_scenario();
+    let path = FootEdgeId::new(1);
+    let lane = LaneId::new(1);
+    spec.demand.foot_edges.push(FootEdgeSpec {
+        id: path,
+        from: ZoneId::new(1),
+        to: ZoneId::new(2),
+        travel_ticks: nz(2),
+        capacity: nz(10),
+        discharge: nz(1),
+        signal: None,
+    });
+    let cell = Cell { x: 0, y: 0 };
+    spec.layout.tiles.push(TileSpec {
+        cell,
+        terrain: Terrain::Land,
+    });
+    spec.layout.streets.push(StreetSite {
+        lane,
+        cells: vec![cell],
+        bridge: false,
+        road_width_mm: 3000,
+        foot_width_mm: 1000,
+        greenery_width_mm: 1000,
+        width_mm: nz(7000),
+        foot_edges: vec![path],
+    });
+    let mut sim = Simulation::new_game(spec, RuleSet::default(), 1).unwrap();
+    let widths = |foot_width_mm| EditCommand {
+        expected_revision: 0,
+        actions: vec![EditAction::SetStreetWidths {
+            lane,
+            road_width_mm: 3000,
+            foot_width_mm,
+            greenery_width_mm: 1500,
+        }],
+    };
+    assert!(sim.preview(&widths(3000)).is_err());
+    let preview = sim.preview(&widths(2000)).unwrap();
+    assert_eq!(preview.affected_foot_edges, [path]);
+    sim.apply(Command::CommitEdit(widths(2000))).unwrap();
+    let restored = Simulation::load(&sim.save().unwrap()).unwrap();
+    let Observation::FootEdge(edge) = restored.inspect(Query::FootEdge(path)).unwrap() else {
+        panic!("foot edge");
+    };
+    assert_eq!(edge.discharge.get(), 2);
+}

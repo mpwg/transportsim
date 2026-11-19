@@ -89,10 +89,11 @@ pub struct Simulation {
 impl Simulation {
     /// Validates and starts a scenario with deterministic initial conditions.
     pub fn new_game(
-        scenario: Scenario,
+        mut scenario: Scenario,
         rules: RuleSet,
         seed: u64,
     ) -> Result<Self, ValidationError> {
+        scenario.layout.sort_tables();
         let traffic = scenario.start;
         let world = World::from_scenario(scenario.clone())?;
         Ok(Self {
@@ -252,6 +253,16 @@ impl Simulation {
                     &self.world.taxi,
                 )))
             }
+            Query::Layout => Ok(Observation::Layout(self.scenario.layout.clone())),
+            Query::FootEdge(id) => self
+                .scenario
+                .demand
+                .foot_edges
+                .iter()
+                .find(|edge| edge.id == id)
+                .cloned()
+                .map(Observation::FootEdge)
+                .ok_or(QueryError::UnknownFootEdge(id)),
             Query::Lane(id) => self
                 .world
                 .road

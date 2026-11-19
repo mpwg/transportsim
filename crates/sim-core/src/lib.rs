@@ -4,6 +4,7 @@ mod demand;
 mod edit;
 mod ids;
 mod junction;
+mod layout;
 mod network;
 mod observe;
 mod routing;
@@ -48,3 +49,5 @@ pub use taxi::{
 };
 
 pub use edit::{EditAction, EditCommand, EditError, EditPreview, TurnPocket};
+
+pub use layout::{BuildingSite, Cell, LayoutError, LayoutSpec, StreetSite, Terrain, TileSpec};
