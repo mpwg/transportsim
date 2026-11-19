@@ -149,6 +149,8 @@ impl std::error::Error for DemandError {}
 #[non_exhaustive]
 pub struct ActiveJourney {
     pub origin: ZoneId,
+    /// Origin of the remaining journey, after leaving a car at an exit if applicable.
+    pub location: ZoneId,
     pub destination: Option<ZoneId>,
     pub purpose: TripPurpose,
     pub mode: Option<JourneyMode>,
@@ -176,6 +178,8 @@ pub struct DemandObservation {
 #[serde(deny_unknown_fields)]
 struct Cohort {
     origin: ZoneId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resume_from: Option<ZoneId>,
     destination: Option<ZoneId>,
     purpose: TripPurpose,
     created: Tick,
@@ -211,6 +215,8 @@ pub(crate) struct DemandSnapshot {
     #[serde(default)]
     measurements: TravelWindows,
     walking: WalkingSnapshot,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    retry_parked: bool,
     #[serde(default, skip_serializing_if = "TransitState::is_empty")]
     transit: TransitState,
 }
@@ -223,22 +229,30 @@ impl DemandSnapshot {
             .filter_map(|zone| Some((zone.id, zone.road_access?)))
             .collect();
         for cohort in self.cohorts.values_mut() {
-            let Some(JourneyPath::Car { from, movements }) = &mut cohort.path else {
-                continue;
-            };
-            let Some(&start) = accesses.get(&cohort.origin) else {
-                continue;
-            };
-            let Some(&end) = cohort.destination.and_then(|id| accesses.get(&id)) else {
-                continue;
-            };
-            if *from == start && road.supports_car_route(start, end, movements) {
+            if !matches!(
+                cohort.path,
+                Some(JourneyPath::Car { .. } | JourneyPath::CarWaiting)
+            ) {
+                self.retry_parked |= cohort.resume_from.is_some() && cohort.path.is_none();
                 continue;
             }
-            if let Some((_, replacement)) = road.route(start, end) {
-                *from = start;
-                *movements = replacement;
+            let endpoints = accesses
+                .get(&cohort.origin)
+                .zip(cohort.destination.and_then(|id| accesses.get(&id)));
+            if let Some((&start, &end)) = endpoints
+                && matches!(&cohort.path, Some(JourneyPath::Car { from, movements })
+                    if start == *from && road.supports_car_route(start, end, movements))
+            {
+                continue;
             }
+            cohort.path = Some(
+                endpoints
+                    .and_then(|(&from, &end)| {
+                        road.route(from, end)
+                            .map(|(_, movements)| JourneyPath::Car { from, movements })
+                    })
+                    .unwrap_or(JourneyPath::CarWaiting),
+            );
         }
     }
 
@@ -484,8 +498,13 @@ impl DemandState {
             taxi,
         };
         let elapsed = tick.seconds() - 1;
-        if elapsed.is_multiple_of(u64::from(self.spec.planning_window_ticks.get())) {
+        let planning_boundary =
+            elapsed.is_multiple_of(u64::from(self.spec.planning_window_ticks.get()));
+        if planning_boundary {
             self.state.measurements.close();
+        }
+        if std::mem::take(&mut self.state.retry_parked) || planning_boundary {
+            self.replan_parked(tick, planning);
         }
         let day = elapsed / DAY_TICKS;
         if self.state.day != Some(day) {
@@ -498,6 +517,7 @@ impl DemandState {
             self.create(
                 Cohort {
                     origin: order.from,
+                    resume_from: None,
                     destination: Some(order.to),
                     purpose: TripPurpose::Home,
                     created: tick,
@@ -523,6 +543,52 @@ impl DemandState {
     pub(crate) fn after_road(&mut self, tick: Tick, road: &RoadState) {
         for (id, amount) in road.car_arrivals() {
             self.arrive(id, u64::from(amount), tick);
+        }
+        for (id, zone, amount) in road.car_exits() {
+            self.park_cohort(id, zone, u64::from(amount));
+        }
+    }
+
+    fn park_cohort(&mut self, id: u64, zone: ZoneId, amount: u64) {
+        let original = self
+            .state
+            .cohorts
+            .get_mut(&id)
+            .expect("car exit has a journey cohort");
+        original.in_transit -= amount;
+        let parked = Cohort {
+            resume_from: Some(zone),
+            path: None,
+            waiting: amount,
+            in_transit: 0,
+            ..original.clone()
+        };
+        if original.waiting == 0 && original.in_transit == 0 {
+            self.state.cohorts.remove(&id);
+        }
+        self.insert(parked);
+        self.state.retry_parked = true;
+    }
+
+    fn replan_parked(&mut self, tick: Tick, planning: Planning<'_>) {
+        let parked: Vec<_> = self
+            .state
+            .cohorts
+            .iter()
+            .filter_map(|(&id, cohort)| {
+                (cohort.path.is_none()).then_some((id, cohort.resume_from?, cohort.destination?))
+            })
+            .collect();
+        for (id, from, to) in parked {
+            let options: Vec<_> = self
+                .options(from, to, tick, planning)
+                .into_iter()
+                .filter(|(info, _)| matches!(info.mode, JourneyMode::Walk | JourneyMode::Transit))
+                .collect();
+            if !options.is_empty() {
+                let cohort = self.state.cohorts.remove(&id).expect("parked journey");
+                self.assign_modes(cohort, options);
+            }
         }
     }
 
@@ -653,6 +719,7 @@ impl DemandState {
             }
             schedule.push(Cohort {
                 origin,
+                resume_from: None,
                 destination: Some(destination),
                 purpose,
                 created: tick,
@@ -665,6 +732,7 @@ impl DemandState {
         if remaining != 0 {
             schedule.push(Cohort {
                 origin,
+                resume_from: None,
                 destination: None,
                 purpose,
                 created: tick,
@@ -681,6 +749,10 @@ impl DemandState {
         let options = cohort.destination.map_or_else(Vec::new, |to| {
             self.options(cohort.origin, to, cohort.created, planning)
         });
+        self.assign_modes(cohort, options);
+    }
+
+    fn assign_modes(&mut self, cohort: Cohort, options: Vec<(JourneyOption, JourneyPath)>) {
         if options.is_empty() {
             self.insert(cohort);
             return;
@@ -734,7 +806,7 @@ impl DemandState {
                 Some(JourneyPath::Car { from, movements }) => {
                     road.enter_cars(*from, movements, offered, tick, id)
                 }
-                None => 0,
+                Some(JourneyPath::CarWaiting) | None => 0,
             };
             cohort.waiting -= u64::from(admitted);
             cohort.in_transit += u64::from(admitted);
@@ -762,9 +834,11 @@ impl DemandState {
         self.state.total_travel_ticks += u128::from(amount) * u128::from(ticks);
         let destination = cohort.destination.expect("arrival has a destination");
         let mode = cohort.path.as_ref().expect("arrival has a route").mode();
-        self.state
-            .measurements
-            .record(cohort.origin, destination, mode, ticks, amount);
+        if cohort.resume_from.is_none() {
+            self.state
+                .measurements
+                .record(cohort.origin, destination, mode, ticks, amount);
+        }
         if let Some(due) = cohort.return_due {
             let release = due.max(Tick::new(tick.seconds().saturating_add(1)));
             self.state
@@ -797,6 +871,7 @@ impl DemandState {
                 let reserved = taxi_waiting.get(&id).copied().unwrap_or(0);
                 ActiveJourney {
                     origin: cohort.origin,
+                    location: cohort.resume_from.unwrap_or(cohort.origin),
                     destination: cohort.destination,
                     purpose: cohort.purpose,
                     mode: cohort.path.as_ref().map(JourneyPath::mode),
@@ -894,6 +969,7 @@ impl DemandState {
                         || cohort.waiting == 0
                         || cohort.in_transit != 0
                         || cohort.path.is_some()
+                        || cohort.resume_from.is_some()
                         || cohort.purpose == TripPurpose::Home
                         || cohort.return_due.is_none_or(|due| due < departure)
                         || !self.contains_zone(cohort.origin)
@@ -903,6 +979,24 @@ impl DemandState {
                 })
         }) {
             return Err(error("demand.scheduled"));
+        }
+        for (cohort, end, recovery) in road.car_recoveries() {
+            if recovery.exit.is_some_and(|zone| {
+                self.zones.get(&zone).and_then(|zone| zone.road_access) != Some(end)
+                    || !self.spec.foot_edges.iter().any(|edge| edge.from == zone)
+            }) || cohort.is_some_and(|id| {
+                saved.cohorts.get(&id).is_none_or(|c| {
+                    c.destination
+                        .and_then(|zone| self.zones.get(&zone)?.road_access)
+                        != Some(recovery.target)
+                        || !matches!(
+                            c.path,
+                            Some(JourneyPath::Car { .. } | JourneyPath::CarWaiting)
+                        )
+                })
+            }) {
+                return Err(error("demand.car_recovery"));
+            }
         }
         let mut active_modes = BTreeMap::<(u64, JourneyMode), u128>::new();
         for (id, amount) in road.car_cohorts() {
@@ -934,6 +1028,9 @@ impl DemandState {
                 || id >= WALK_TOKEN
                 || cohort.created > tick
                 || !self.contains_zone(cohort.origin)
+                || cohort
+                    .resume_from
+                    .is_some_and(|zone| !self.contains_zone(zone) || cohort.destination.is_none())
                 || cohort.destination.is_some_and(|to| !self.contains_zone(to))
                 || (cohort.destination.is_none() && cohort.path.is_some())
                 || (cohort.waiting == 0 && cohort.in_transit == 0)
@@ -946,19 +1043,27 @@ impl DemandState {
                     return Err(error("demand.in_transit"));
                 }
                 let to = cohort.destination.expect("validated destination");
+                let from_zone = cohort.resume_from.unwrap_or(cohort.origin);
+                if cohort.resume_from.is_some()
+                    && !matches!(path, JourneyPath::Walk(_) | JourneyPath::Transit(_))
+                {
+                    return Err(error("demand.path"));
+                }
                 let valid = match path {
+                    JourneyPath::CarWaiting => self.spec.car_weight != 0,
+
                     JourneyPath::Taxi => {
                         self.spec.taxi_weight != 0 && taxi.can_carry(cohort.origin, to, road)
                     }
                     JourneyPath::Transit(path) => {
                         self.spec.transit_weight != 0
-                            && service.valid_transit_path(cohort.origin, to, path, |a, b, route| {
+                            && service.valid_transit_path(from_zone, to, path, |a, b, route| {
                                 self.walking.supports_route(a, b, route)
                             })
                     }
                     JourneyPath::Walk(edges) => {
                         self.spec.walk_weight != 0
-                            && self.walking.supports_route(cohort.origin, to, edges)
+                            && self.walking.supports_route(from_zone, to, edges)
                     }
                     JourneyPath::Car { from, movements } => {
                         self.spec.car_weight != 0

@@ -144,6 +144,7 @@ mod tests {
             route: route.to_vec(),
             cohort: Some(17),
             managed: false,
+            recovery: None,
         }
     }
 
@@ -158,6 +159,7 @@ mod tests {
             route: route.to_vec(),
             cohort: None,
             managed: true,
+            recovery: None,
         }
     }
 

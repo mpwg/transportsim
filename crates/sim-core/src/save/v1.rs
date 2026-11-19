@@ -175,6 +175,13 @@ pub(crate) struct LaneV1 {
     pub(crate) queue: Vec<QueueItemV1>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CarRecoveryV1 {
+    pub(crate) target: LaneId,
+    pub(crate) exit: Option<crate::ZoneId>,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct QueueItemV1 {
@@ -185,6 +192,8 @@ pub(crate) struct QueueItemV1 {
     pub(crate) cohort: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) managed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) recovery: Option<CarRecoveryV1>,
 }
 
 #[derive(Deserialize, Serialize)]

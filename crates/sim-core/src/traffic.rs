@@ -3,8 +3,8 @@ use crate::network::{
     JunctionId, LaneId, LaneSpec, MovementId, MovementSpec, RoadValidationError, VehicleId,
     VehicleKind,
 };
-use crate::save::v1::{JunctionV1, LaneV1, QueueItemV1};
-use crate::{LoadError, Tick, ValidationError};
+use crate::save::v1::{CarRecoveryV1, JunctionV1, LaneV1, QueueItemV1};
+use crate::{LoadError, Tick, ValidationError, ZoneId};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::num::NonZeroU32;
@@ -80,6 +80,7 @@ pub enum WaitReason {
     DischargeLimit,
     TargetFull,
     Conflict,
+    Disconnected,
 }
 
 /// Traffic that cleared the lane on the most recent tick.
@@ -110,6 +111,7 @@ struct QueueItem {
     route: VecDeque<MovementId>,
     cohort: Option<u64>,
     managed: bool,
+    recovery: Option<CarRecoveryV1>,
 }
 
 #[derive(Debug)]
@@ -137,6 +139,7 @@ pub(crate) struct RoadState {
     movements: BTreeMap<MovementId, MovementSpec>,
     junctions: BTreeMap<JunctionId, JunctionState>,
     car_arrivals: Vec<(u64, u32)>,
+    car_exits: Vec<(u64, ZoneId, u32)>,
 }
 
 #[derive(Clone, Copy)]
@@ -245,6 +248,7 @@ impl RoadState {
             route: route.iter().copied().collect(),
             cohort: Some(cohort),
             managed: false,
+            recovery: None,
         };
         self.push_queue_item(from, item)
             .map_or(0, |()| admitted.get())
@@ -274,6 +278,7 @@ impl RoadState {
             route: route.iter().copied().collect(),
             cohort: None,
             managed: true,
+            recovery: None,
         };
         self.push_queue_item(from, item).is_ok()
     }
@@ -334,9 +339,14 @@ impl RoadState {
         })
     }
 
-    /// Terminal departures produced by the most recent tick.
+    /// Arrivals at the original destination produced by the most recent tick.
     pub(crate) fn car_arrivals(&self) -> impl Iterator<Item = (u64, u32)> + '_ {
         self.car_arrivals.iter().copied()
+    }
+
+    /// Recovery departures at alternative access zones on the most recent tick.
+    pub(crate) fn car_exits(&self) -> impl Iterator<Item = (u64, ZoneId, u32)> + '_ {
+        self.car_exits.iter().copied()
     }
 
     /// Each part of a cohort that still occupies a lane.
@@ -345,6 +355,18 @@ impl RoadState {
             .values()
             .flat_map(|lane| &lane.queue)
             .filter_map(|item| Some((item.cohort?, item.entry.units())))
+    }
+
+    pub(crate) fn car_recoveries(
+        &self,
+    ) -> impl Iterator<Item = (Option<u64>, LaneId, CarRecoveryV1)> + '_ {
+        self.lanes.iter().flat_map(move |(&lane, state)| {
+            state.queue.iter().filter_map(move |item| {
+                let recovery = item.recovery?;
+                let endpoint = item.route.back().map_or(lane, |id| self.movements[id].to);
+                Some((item.cohort, endpoint, recovery))
+            })
+        })
     }
 
     pub(crate) fn contains_lane(&self, id: LaneId) -> bool {
@@ -400,6 +422,7 @@ impl RoadState {
             movements: BTreeMap::new(),
             junctions: BTreeMap::new(),
             car_arrivals: Vec::new(),
+            car_exits: Vec::new(),
         };
         for spec in lanes {
             let id = spec.id;
@@ -504,6 +527,7 @@ impl RoadState {
                 route: seed.route.into(),
                 cohort: None,
                 managed: false,
+                recovery: None,
             },
         )
     }
@@ -611,6 +635,7 @@ impl RoadState {
                         route: item.route.iter().copied().collect(),
                         cohort: item.cohort,
                         managed: item.managed,
+                        recovery: item.recovery,
                     })
                     .collect(),
             })
@@ -645,6 +670,7 @@ impl RoadState {
             return Err(LoadError::InvalidState { field: "junctions" });
         }
         self.car_arrivals.clear();
+        self.car_exits.clear();
         for lane in self.lanes.values_mut() {
             lane.queue.clear();
             lane.occupied_mm = 0;
@@ -697,6 +723,14 @@ impl RoadState {
                         field: "lanes.queue.ready_at",
                     });
                 }
+                if let Some(recovery) = item.recovery
+                    && (!matches!(item.entry, QueueEntry::PrivateCars(_))
+                        || (recovery.exit.is_none() && !item.route.is_empty()))
+                {
+                    return Err(LoadError::InvalidState {
+                        field: "lanes.queue.recovery",
+                    });
+                }
                 if let Some(id) = item.entry.vehicle_id() {
                     if item.cohort.is_some() {
                         return Err(LoadError::InvalidState {
@@ -719,6 +753,7 @@ impl RoadState {
                         route: item.route.into(),
                         cohort: item.cohort,
                         managed: item.managed,
+                        recovery: item.recovery,
                     },
                 )
                 .map_err(road_error)?;
@@ -766,6 +801,7 @@ impl RoadState {
 
     pub(crate) fn tick(&mut self, tick: Tick) {
         self.car_arrivals.clear();
+        self.car_exits.clear();
         let requests = self.plan_moves(tick);
         let granted = self.reserve_moves(&requests);
         self.commit_moves(tick, &granted);
@@ -782,6 +818,13 @@ impl RoadState {
             };
             if head.ready_at.is_none_or(|ready| ready > tick) {
                 lane.wait = Some(WaitReason::TravelTime);
+                continue;
+            }
+            if head
+                .recovery
+                .is_some_and(|recovery| recovery.exit.is_none())
+            {
+                lane.wait = Some(WaitReason::Disconnected);
                 continue;
             }
             let movement = head.route.front().copied();
@@ -901,6 +944,7 @@ impl RoadState {
                     route: head.route.clone(),
                     cohort: head.cohort,
                     managed: false,
+                    recovery: head.recovery,
                 });
             }
             if let Some(to) = movement.to {
@@ -913,9 +957,21 @@ impl RoadState {
                     route: head.route,
                     cohort: head.cohort,
                     managed: head.managed,
+                    recovery: head.recovery,
                 });
             } else if let Some(cohort) = head.cohort {
-                self.car_arrivals.push((cohort, movement.units.get()));
+                let units = movement.units.get();
+                match head.recovery {
+                    Some(CarRecoveryV1 {
+                        exit: Some(zone), ..
+                    }) => {
+                        self.car_exits.push((cohort, zone, units));
+                    }
+                    None => self.car_arrivals.push((cohort, units)),
+                    Some(CarRecoveryV1 { exit: None, .. }) => {
+                        unreachable!("disconnected cars cannot depart");
+                    }
+                }
             }
         }
     }
@@ -1183,6 +1239,99 @@ mod tests {
         road.tick(Tick::new(7));
         assert!(road.car_arrivals().next().is_none());
         assert!(road.car_cohorts().next().is_none());
+    }
+
+    #[test]
+    fn car_recovery_survives_split_and_restore() {
+        let make_road = || {
+            road(
+                (1..=5)
+                    .map(|id| lane(id, 1, 10_000, VehicleKind::Car))
+                    .collect(),
+                vec![movement(1, 1, 2)],
+                Vec::new(),
+            )
+        };
+        let mut road = make_road();
+        let route = [MovementId::new(1)];
+        let zero = Tick::new(0);
+        assert_eq!(road.enter_cars(LaneId::new(1), &route, 2, zero, 42), 2);
+        assert_eq!(road.enter_cars(LaneId::new(3), &[], 1, zero, 43), 1);
+        assert_eq!(road.enter_cars(LaneId::new(3), &[], 1, zero, 44), 1);
+        assert_eq!(road.enter_cars(LaneId::new(4), &[], 1, zero, 45), 1);
+        road.seed(TrafficSeed {
+            lane: LaneId::new(5),
+            entry: QueueEntry::PrivateCars(NonZeroU32::MIN),
+            ready_at: Tick::new(1),
+            route: Vec::new(),
+        })
+        .unwrap();
+
+        let (lanes, junctions) = road.snapshot();
+        let mut saved = serde_json::to_value(lanes).unwrap();
+        saved[0]["queue"][0]["recovery"] = serde_json::json!({ "target": 90, "exit": 7 });
+        saved[2]["queue"][0]["recovery"] = serde_json::json!({ "target": 91, "exit": null });
+        saved[4]["queue"][0]["recovery"] = serde_json::json!({ "target": 92, "exit": 8 });
+        road.restore(zero, serde_json::from_value(saved).unwrap(), junctions)
+            .unwrap();
+
+        road.tick(Tick::new(1));
+        let blocked = road.observe(LaneId::new(3), Tick::new(1)).unwrap();
+        assert_eq!(blocked.wait_reason, Some(WaitReason::Disconnected));
+        assert_eq!(blocked.occupied_mm, 10_000);
+        assert!(blocked.departure.is_none());
+        assert_eq!(road.car_arrivals().collect::<Vec<_>>(), vec![(45, 1)]);
+        assert!(road.car_exits().next().is_none());
+        assert_eq!(
+            road.observe(LaneId::new(5), Tick::new(1))
+                .unwrap()
+                .occupied_mm,
+            0
+        );
+
+        let snapshot = serde_json::to_vec(&road.snapshot()).unwrap();
+        let (lanes, junctions) = serde_json::from_slice(&snapshot).unwrap();
+        let mut road = make_road();
+        road.restore(Tick::new(1), lanes, junctions).unwrap();
+        let recoveries: Vec<_> = road
+            .car_recoveries()
+            .map(|(cohort, end, recovery)| (cohort, end, recovery.target, recovery.exit))
+            .collect();
+        assert_eq!(
+            recoveries,
+            [
+                (
+                    Some(42),
+                    LaneId::new(2),
+                    LaneId::new(90),
+                    Some(ZoneId::new(7))
+                ),
+                (
+                    Some(42),
+                    LaneId::new(2),
+                    LaneId::new(90),
+                    Some(ZoneId::new(7))
+                ),
+                (Some(43), LaneId::new(3), LaneId::new(91), None),
+            ]
+        );
+        for tick in [Tick::new(2), Tick::new(3)] {
+            road.tick(tick);
+            assert!(road.car_arrivals().next().is_none());
+            assert_eq!(
+                road.car_exits().collect::<Vec<_>>(),
+                vec![(42, ZoneId::new(7), 1)]
+            );
+        }
+        road.tick(Tick::new(4));
+        assert!(road.car_exits().next().is_none());
+        let blocked = road.observe(LaneId::new(3), Tick::new(4)).unwrap();
+        assert_eq!(blocked.wait_reason, Some(WaitReason::Disconnected));
+        assert_eq!(blocked.occupied_mm, 10_000);
+        assert_eq!(
+            road.car_cohorts().collect::<Vec<_>>(),
+            vec![(43, 1), (44, 1)]
+        );
     }
 
     #[test]

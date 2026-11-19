@@ -7,10 +7,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    JunctionSpec, LaneId, LaneSpec, LineId, LoadError, MovementId, MovementSpec, Scenario,
-    Simulation, ValidationError,
+    FootEdgeId, FootEdgeSpec, JunctionSpec, LaneId, LaneSpec, LineId, LoadError, MovementId,
+    MovementSpec, Scenario, Simulation, ValidationError,
     demand::DemandSnapshot,
-    save::v1::{JunctionV1, LaneV1},
+    save::v1::{CarRecoveryV1, JunctionV1, LaneV1},
     world::World,
 };
 
@@ -36,6 +36,8 @@ pub enum EditAction {
     UpsertMovement(MovementSpec),
     RemoveMovement(MovementId),
     SetSignal(JunctionSpec),
+    UpsertFootEdge(FootEdgeSpec),
+    RemoveFootEdge(FootEdgeId),
     AddTurnPocket(TurnPocket),
     SetHeadway {
         line: LineId,
@@ -57,8 +59,11 @@ pub struct TurnPocket {
 pub struct EditPreview {
     pub revision: u64,
     pub affected_lanes: Vec<LaneId>,
+    pub affected_foot_edges: Vec<FootEdgeId>,
     pub relocated_vehicles: u64,
     pub rerouted_vehicles: u64,
+    pub blocked_vehicles: u64,
+    pub vehicles_en_route_to_exit: u64,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -69,6 +74,7 @@ pub enum EditError {
     Empty,
     MissingLane(LaneId),
     MissingMovement(MovementId),
+    MissingFootEdge(FootEdgeId),
     MissingLine(LineId),
     Occupied(LaneId),
     InvalidPocket(LaneId),
@@ -85,6 +91,7 @@ impl fmt::Display for EditError {
             Self::RevisionOverflow => out.write_str("network revision overflow"),
             Self::Empty => out.write_str("edit has no actions"),
             Self::MissingLane(lane) => write!(out, "unknown lane {}", lane.get()),
+            Self::MissingFootEdge(id) => write!(out, "unknown foot edge {}", id.get()),
             Self::MissingMovement(id) => write!(out, "unknown movement {}", id.get()),
             Self::MissingLine(id) => write!(out, "unknown line {}", id.get()),
             Self::Occupied(lane) => write!(
@@ -115,12 +122,20 @@ pub(crate) struct PreparedEdit {
     pub(crate) preview: EditPreview,
 }
 
+#[derive(Default)]
+struct RouteChanges {
+    rerouted: u64,
+    blocked: u64,
+    en_route_to_exit: u64,
+}
+
 struct Draft {
     scenario: Scenario,
     lanes: Vec<LaneV1>,
     junctions: Vec<JunctionV1>,
     demand: Option<DemandSnapshot>,
     affected: BTreeSet<LaneId>,
+    affected_foot_edges: BTreeSet<FootEdgeId>,
     relocated_vehicles: u64,
     headways: BTreeMap<LineId, NonZeroU32>,
 }
@@ -137,6 +152,7 @@ impl Draft {
             junctions,
             demand: simulation.world.demand.snapshot(),
             affected: BTreeSet::new(),
+            affected_foot_edges: BTreeSet::new(),
             relocated_vehicles: 0,
             headways: BTreeMap::new(),
         }
@@ -227,6 +243,24 @@ impl Draft {
                         .filter(|m| m.junction == junction.id)
                         .flat_map(|m| [m.from, m.to]),
                 );
+            }
+            EditAction::UpsertFootEdge(edge) => {
+                let edges = &mut self.scenario.demand.foot_edges;
+                if let Some(previous) = edges.iter_mut().find(|old| old.id == edge.id) {
+                    *previous = edge.clone();
+                } else {
+                    edges.push(edge.clone());
+                }
+                self.affected_foot_edges.insert(edge.id);
+            }
+            EditAction::RemoveFootEdge(id) => {
+                let edges = &mut self.scenario.demand.foot_edges;
+                let index = edges
+                    .iter()
+                    .position(|edge| edge.id == *id)
+                    .ok_or(EditError::MissingFootEdge(*id))?;
+                edges.remove(index);
+                self.affected_foot_edges.insert(*id);
             }
             EditAction::AddTurnPocket(pocket) => self.pocket(pocket, tick)?,
             EditAction::SetHeadway { line, ticks } => {
@@ -350,42 +384,99 @@ impl Draft {
         Ok(())
     }
 
-    fn repair_routes(&mut self, previous: &Scenario, road: &crate::traffic::RoadState) -> u64 {
+    fn repair_routes(
+        &mut self,
+        previous: &Scenario,
+        road: &crate::traffic::RoadState,
+    ) -> RouteChanges {
         let destinations: BTreeMap<_, _> = previous
             .movements
             .iter()
             .map(|movement| (movement.id, movement.to))
             .collect();
-        let mut rerouted = 0;
+        let has_foot_access: BTreeSet<_> = self
+            .scenario
+            .demand
+            .foot_edges
+            .iter()
+            .map(|edge| edge.from)
+            .collect();
+        let exits: BTreeMap<_, _> = self
+            .scenario
+            .demand
+            .zones
+            .iter()
+            .filter(|zone| has_foot_access.contains(&zone.id))
+            .filter_map(|zone| Some((zone.id, zone.road_access?)))
+            .collect();
+        let mut changes = RouteChanges::default();
         for lane in &mut self.lanes {
             for item in &mut lane.queue {
-                let Some(destination) = item
-                    .route
-                    .last()
-                    .and_then(|id| destinations.get(id))
-                    .copied()
-                else {
+                let target = item.recovery.map(|recovery| recovery.target).or_else(|| {
+                    item.route
+                        .last()
+                        .and_then(|id| destinations.get(id))
+                        .copied()
+                });
+                let Some(target) = target else {
                     continue;
                 };
-                if road.supports_vehicle_route(lane.id, destination, &item.entry, &item.route) {
+                if item.recovery.is_none()
+                    && road.supports_vehicle_route(lane.id, target, &item.entry, &item.route)
+                {
                     continue;
                 }
+                let units = u64::from(item.entry.units());
                 let length =
                     NonZeroU32::new(item.entry.unit_space()).expect("positive vehicle length");
                 if let Some((_, replacement)) =
-                    road.route_for_length(item.entry.kind(), lane.id, destination, length)
+                    road.route_for_length(item.entry.kind(), lane.id, target, length)
                 {
                     item.route = replacement;
-                    rerouted += u64::from(item.entry.units());
-                    lane.wait = None;
-                    self.affected.insert(lane.id);
+                    item.recovery = None;
+                    changes.rerouted += units;
+                } else if matches!(item.entry, crate::QueueEntry::PrivateCars(_)) {
+                    let exit_in_progress = item
+                        .recovery
+                        .and_then(|r| r.exit)
+                        .and_then(|zone| exits.get(&zone))
+                        .is_some_and(|&exit_lane| {
+                            road.supports_car_route(lane.id, exit_lane, &item.route)
+                        });
+                    if exit_in_progress {
+                        continue;
+                    }
+                    let exit = exits
+                        .iter()
+                        .filter_map(|(&zone, &lane_id)| {
+                            let (cost, route) = road.route(lane.id, lane_id)?;
+                            Some((cost, zone, route))
+                        })
+                        .min();
+                    if let Some((_, zone, route)) = exit {
+                        item.route = route;
+                        item.recovery = Some(CarRecoveryV1 {
+                            target,
+                            exit: Some(zone),
+                        });
+                        changes.en_route_to_exit += units;
+                    } else {
+                        item.route.clear();
+                        item.recovery = Some(CarRecoveryV1 { target, exit: None });
+                        changes.blocked += units;
+                    }
+                } else {
+                    // Other vehicle services still validate their routes at this boundary.
+                    continue;
                 }
+                lane.wait = None;
+                self.affected.insert(lane.id);
             }
         }
         if let Some(demand) = &mut self.demand {
             demand.repair_car_paths(&self.scenario.demand, road);
         }
-        rerouted
+        changes
     }
 
     fn finish(mut self, sim: &Simulation, revision: u64) -> Result<PreparedEdit, EditError> {
@@ -395,7 +486,7 @@ impl Draft {
             })?;
         let invalid = EditError::WouldInvalidate;
         let tick = sim.traffic;
-        let rerouted_vehicles = self.repair_routes(&sim.scenario, &world.road);
+        let changes = self.repair_routes(&sim.scenario, &world.road);
         world
             .road
             .restore(tick, self.lanes, self.junctions)
@@ -423,8 +514,11 @@ impl Draft {
             preview: EditPreview {
                 revision,
                 affected_lanes: self.affected.into_iter().collect(),
+                affected_foot_edges: self.affected_foot_edges.into_iter().collect(),
                 relocated_vehicles: self.relocated_vehicles,
-                rerouted_vehicles,
+                rerouted_vehicles: changes.rerouted,
+                blocked_vehicles: changes.blocked,
+                vehicles_en_route_to_exit: changes.en_route_to_exit,
             },
         })
     }

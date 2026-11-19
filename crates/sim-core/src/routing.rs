@@ -31,6 +31,7 @@ pub(crate) enum JourneyPath {
     Walk(Vec<FootEdgeId>),
     Transit(transit::TransitPath),
     Taxi,
+    CarWaiting,
     Car {
         from: LaneId,
         movements: Vec<MovementId>,
@@ -43,7 +44,7 @@ impl JourneyPath {
             Self::Taxi => JourneyMode::Taxi,
             Self::Transit(_) => JourneyMode::Transit,
             Self::Walk(_) => JourneyMode::Walk,
-            Self::Car { .. } => JourneyMode::Car,
+            Self::CarWaiting | Self::Car { .. } => JourneyMode::Car,
         }
     }
 }

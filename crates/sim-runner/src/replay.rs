@@ -260,6 +260,7 @@ fn wait_reason(reason: WaitReason) -> &'static str {
         WaitReason::TargetFull => "target_full",
         WaitReason::Conflict => "conflict",
         WaitReason::VehicleStop => "vehicle_stop",
+        WaitReason::Disconnected => "disconnected",
         _ => "unknown",
     }
 }
