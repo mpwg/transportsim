@@ -45,6 +45,13 @@ impl QueueEntry {
         }
     }
 
+    fn vehicle_id(&self) -> Option<VehicleId> {
+        match self {
+            Self::Vehicle { id, .. } => Some(*id),
+            Self::PrivateCars(_) => None,
+        }
+    }
+
     fn first_units(&self, units: NonZeroU32) -> Self {
         match self {
             Self::PrivateCars(_) => Self::PrivateCars(units),
@@ -68,6 +75,7 @@ pub struct TrafficSeed {
 #[serde(rename_all = "snake_case")]
 pub enum WaitReason {
     TravelTime,
+    VehicleStop,
     RedSignal,
     DischargeLimit,
     TargetFull,
@@ -101,6 +109,7 @@ struct QueueItem {
     ready_at: Option<Tick>,
     route: VecDeque<MovementId>,
     cohort: Option<u64>,
+    managed: bool,
 }
 
 #[derive(Debug)]
@@ -112,6 +121,14 @@ struct LaneState {
     queue: VecDeque<QueueItem>,
     wait: Option<WaitReason>,
     departure: Option<LaneDeparture>,
+}
+
+impl LaneState {
+    fn ready_after_entry(&self, tick: Tick) -> Option<Tick> {
+        tick.seconds()
+            .checked_add(u64::from(self.spec.travel_ticks.get()))
+            .map(Tick::new)
+    }
 }
 
 #[derive(Debug)]
@@ -140,9 +157,34 @@ struct GrantedMove {
 impl RoadState {
     /// Free-flow cost includes every lane from the source to the destination.
     pub(crate) fn route(&self, from: LaneId, to: LaneId) -> Option<(u64, Vec<MovementId>)> {
-        let car = QueueEntry::PrivateCars(NonZeroU32::MIN);
-        self.validate_lane(from, &car).ok()?;
-        self.validate_lane(to, &car).ok()?;
+        self.route_for(VehicleKind::Car, from, to)
+    }
+
+    pub(crate) fn route_for(
+        &self,
+        kind: VehicleKind,
+        from: LaneId,
+        to: LaneId,
+    ) -> Option<(u64, Vec<MovementId>)> {
+        let length_mm = if kind == VehicleKind::Car {
+            NonZeroU32::new(CAR_SPACE_MM).expect("positive car space")
+        } else {
+            NonZeroU32::MIN
+        };
+        self.route_for_length(kind, from, to, length_mm)
+    }
+
+    /// Free-flow routing through lanes that can accommodate this vehicle.
+    pub(crate) fn route_for_length(
+        &self,
+        kind: VehicleKind,
+        from: LaneId,
+        to: LaneId,
+        length_mm: NonZeroU32,
+    ) -> Option<(u64, Vec<MovementId>)> {
+        let unit_space = length_mm.get();
+        self.validate_lane(from, kind, unit_space).ok()?;
+        self.validate_lane(to, kind, unit_space).ok()?;
         let initial_cost = u64::from(self.lanes[&from].spec.travel_ticks.get());
         let mut best = BTreeMap::from([(from, (initial_cost, None))]);
         let mut pending = BinaryHeap::from([Reverse((initial_cost, from))]);
@@ -165,7 +207,7 @@ impl RoadState {
             }
             for &id in &self.lanes[&lane].outgoing {
                 let target = self.movements[&id].to;
-                if self.validate_lane(target, &car).is_err() {
+                if self.validate_lane(target, kind, unit_space).is_err() {
                     continue;
                 }
                 let travel = u64::from(self.lanes[&target].spec.travel_ticks.get());
@@ -199,15 +241,97 @@ impl RoadState {
         };
         let item = QueueItem {
             entry: QueueEntry::PrivateCars(admitted),
-            ready_at: tick
-                .seconds()
-                .checked_add(u64::from(lane.spec.travel_ticks.get()))
-                .map(Tick::new),
+            ready_at: lane.ready_after_entry(tick),
             route: route.iter().copied().collect(),
             cohort: Some(cohort),
+            managed: false,
         };
         self.push_queue_item(from, item)
             .map_or(0, |()| admitted.get())
+    }
+
+    pub(crate) fn enter_vehicle(
+        &mut self,
+        from: LaneId,
+        entry: QueueEntry,
+        route: &[MovementId],
+        tick: Tick,
+    ) -> bool {
+        let (Some(id), Some(lane)) = (entry.vehicle_id(), self.lanes.get(&from)) else {
+            return false;
+        };
+        if self
+            .lanes
+            .values()
+            .flat_map(|lane| &lane.queue)
+            .any(|item| item.entry.vehicle_id() == Some(id))
+        {
+            return false;
+        }
+        let item = QueueItem {
+            entry,
+            ready_at: lane.ready_after_entry(tick),
+            route: route.iter().copied().collect(),
+            cohort: None,
+            managed: true,
+        };
+        self.push_queue_item(from, item).is_ok()
+    }
+
+    pub(crate) fn vehicle_at_stop(&self, id: VehicleId, tick: Tick) -> Option<LaneId> {
+        self.lanes.iter().find_map(|(&lane_id, lane)| {
+            let head = lane.queue.front()?;
+            (head.managed
+                && head.route.is_empty()
+                && head.ready_at.is_some_and(|ready| ready <= tick)
+                && head.entry.vehicle_id() == Some(id))
+            .then_some(lane_id)
+        })
+    }
+
+    /// Replaces a completed route without repeating the current lane's travel time.
+    pub(crate) fn depart_vehicle(
+        &mut self,
+        id: VehicleId,
+        route: &[MovementId],
+        not_before: Tick,
+    ) -> bool {
+        let Some(lane_id) = self.vehicle_at_stop(id, not_before) else {
+            return false;
+        };
+        let head = self.lanes[&lane_id].queue.front().expect("vehicle at stop");
+        if self.validate_route(lane_id, &head.entry, route).is_err() {
+            return false;
+        }
+        let lane = self.lanes.get_mut(&lane_id).expect("vehicle at stop");
+        let head = lane.queue.front_mut().expect("vehicle at stop");
+        head.route.extend(route.iter().copied());
+        head.ready_at = Some(not_before);
+        true
+    }
+
+    pub(crate) fn park_vehicle(&mut self, id: VehicleId, tick: Tick) -> bool {
+        let Some(lane_id) = self.vehicle_at_stop(id, tick) else {
+            return false;
+        };
+        let lane = self.lanes.get_mut(&lane_id).expect("vehicle at stop");
+        let head = lane.queue.pop_front().expect("vehicle at stop");
+        lane.occupied_mm -= head.entry.unit_space();
+        if lane.wait == Some(WaitReason::VehicleStop) {
+            lane.wait = None;
+        }
+        true
+    }
+
+    pub(crate) fn managed_vehicles(
+        &self,
+    ) -> impl Iterator<Item = (VehicleId, LaneId, VehicleKind)> + '_ {
+        self.lanes.iter().flat_map(|(&lane_id, lane)| {
+            lane.queue.iter().filter_map(move |item| match item.entry {
+                QueueEntry::Vehicle { id, kind, .. } if item.managed => Some((id, lane_id, kind)),
+                _ => None,
+            })
+        })
     }
 
     /// Terminal departures produced by the most recent tick.
@@ -225,6 +349,17 @@ impl RoadState {
 
     pub(crate) fn contains_lane(&self, id: LaneId) -> bool {
         self.lanes.contains_key(&id)
+    }
+
+    pub(crate) fn departed_vehicle(&self, lane: LaneId, vehicle: VehicleId) -> bool {
+        self.lanes
+            .get(&lane)
+            .and_then(|lane| lane.departure.as_ref())
+            .is_some_and(|departure| departure.entry.vehicle_id() == Some(vehicle))
+    }
+
+    pub(crate) fn lane_travel_ticks(&self, id: LaneId) -> Option<u32> {
+        self.lanes.get(&id).map(|lane| lane.spec.travel_ticks.get())
     }
 
     pub(crate) fn contains_movement(&self, id: MovementId) -> bool {
@@ -351,6 +486,7 @@ impl RoadState {
                 ready_at: Some(seed.ready_at),
                 route: seed.route.into(),
                 cohort: None,
+                managed: false,
             },
         )
     }
@@ -360,20 +496,7 @@ impl RoadState {
         start: LaneId,
         item: QueueItem,
     ) -> Result<(), RoadValidationError> {
-        let mut lane_id = start;
-        self.validate_lane(lane_id, &item.entry)?;
-        for &id in &item.route {
-            let movement = self
-                .movements
-                .get(&id)
-                .filter(|m| m.from == lane_id)
-                .ok_or(RoadValidationError::InvalidRoute {
-                    lane: lane_id,
-                    movement: id,
-                })?;
-            lane_id = movement.to;
-            self.validate_lane(lane_id, &item.entry)?;
-        }
+        self.validate_route(start, &item.entry, &item.route)?;
         let lane = self.lanes.get_mut(&start).expect("validated queue lane");
         let occupied = u64::from(lane.occupied_mm)
             + u64::from(item.entry.units()) * u64::from(item.entry.unit_space());
@@ -385,16 +508,44 @@ impl RoadState {
         Ok(())
     }
 
-    fn validate_lane(&self, id: LaneId, entry: &QueueEntry) -> Result<(), RoadValidationError> {
+    fn validate_route<'a>(
+        &self,
+        mut lane_id: LaneId,
+        entry: &QueueEntry,
+        route: impl IntoIterator<Item = &'a MovementId>,
+    ) -> Result<(), RoadValidationError> {
+        let kind = entry.kind();
+        let unit_space = entry.unit_space();
+        self.validate_lane(lane_id, kind, unit_space)?;
+        for &id in route {
+            let movement = self
+                .movements
+                .get(&id)
+                .filter(|m| m.from == lane_id)
+                .ok_or(RoadValidationError::InvalidRoute {
+                    lane: lane_id,
+                    movement: id,
+                })?;
+            lane_id = movement.to;
+            self.validate_lane(lane_id, kind, unit_space)?;
+        }
+        Ok(())
+    }
+
+    fn validate_lane(
+        &self,
+        id: LaneId,
+        kind: VehicleKind,
+        unit_space: u32,
+    ) -> Result<(), RoadValidationError> {
         let lane = self
             .lanes
             .get(&id)
             .ok_or(RoadValidationError::UnknownLane(id))?;
-        let kind = entry.kind();
         if !lane.spec.allowed.contains(&kind) {
             return Err(RoadValidationError::VehicleNotAllowed { lane: id, kind });
         }
-        if entry.unit_space() > lane.spec.capacity_mm.get() {
+        if unit_space > lane.spec.capacity_mm.get() {
             return Err(RoadValidationError::OverCapacity(id));
         }
         Ok(())
@@ -421,6 +572,7 @@ impl RoadState {
                         ready_at: item.ready_at,
                         route: item.route.iter().copied().collect(),
                         cohort: item.cohort,
+                        managed: item.managed,
                     })
                     .collect(),
             })
@@ -507,7 +659,7 @@ impl RoadState {
                         field: "lanes.queue.ready_at",
                     });
                 }
-                if let QueueEntry::Vehicle { id, .. } = item.entry {
+                if let Some(id) = item.entry.vehicle_id() {
                     if item.cohort.is_some() {
                         return Err(LoadError::InvalidState {
                             field: "lanes.queue.cohort",
@@ -516,6 +668,10 @@ impl RoadState {
                     if !vehicles.insert(id) {
                         return Err(road_error(RoadValidationError::DuplicateVehicle(id)));
                     }
+                } else if item.managed {
+                    return Err(LoadError::InvalidState {
+                        field: "lanes.queue.managed",
+                    });
                 }
                 self.push_queue_item(
                     saved.id,
@@ -524,6 +680,7 @@ impl RoadState {
                         ready_at: item.ready_at,
                         route: item.route.into(),
                         cohort: item.cohort,
+                        managed: item.managed,
                     },
                 )
                 .map_err(road_error)?;
@@ -590,6 +747,10 @@ impl RoadState {
                 continue;
             }
             let movement = head.route.front().copied();
+            if movement.is_none() && head.managed {
+                lane.wait = Some(WaitReason::VehicleStop);
+                continue;
+            }
             if let Some(id) = movement
                 && !self.junctions[&self.movements[&id].junction].allows(id, tick)
             {
@@ -701,6 +862,7 @@ impl RoadState {
                     ready_at: head.ready_at,
                     route: head.route.clone(),
                     cohort: head.cohort,
+                    managed: false,
                 });
             }
             if let Some(to) = movement.to {
@@ -709,12 +871,10 @@ impl RoadState {
                 head.route.pop_front();
                 target.queue.push_back(QueueItem {
                     entry,
-                    ready_at: tick
-                        .seconds()
-                        .checked_add(u64::from(target.spec.travel_ticks.get()))
-                        .map(Tick::new),
+                    ready_at: target.ready_after_entry(tick),
                     route: head.route,
                     cohort: head.cohort,
+                    managed: head.managed,
                 });
             } else if let Some(cohort) = head.cohort {
                 self.car_arrivals.push((cohort, movement.units.get()));
@@ -805,6 +965,129 @@ mod tests {
         assert_eq!(road.route(LaneId::new(4), LaneId::new(1)), None);
         assert_eq!(road.route(LaneId::new(1), LaneId::new(5)), None);
         assert_eq!(road.route(LaneId::new(1), LaneId::new(999)), None);
+    }
+
+    #[test]
+    fn vehicle_route_uses_lanes_open_to_its_kind() {
+        let mut start = lane(1, 2, 20_000, VehicleKind::Bus);
+        start.allowed.push(VehicleKind::Car);
+        let mut end = lane(4, 3, 20_000, VehicleKind::Bus);
+        end.allowed.push(VehicleKind::Car);
+        let road = road(
+            vec![
+                start,
+                lane(2, 4, 20_000, VehicleKind::Bus),
+                lane(3, 1, 5_000, VehicleKind::Car),
+                end,
+                lane(5, 1, 5_000, VehicleKind::Bus),
+            ],
+            vec![
+                movement(1, 1, 2),
+                movement(2, 2, 4),
+                movement(3, 1, 3),
+                movement(4, 3, 4),
+                movement(5, 1, 5),
+                movement(6, 5, 4),
+            ],
+            Vec::new(),
+        );
+        let from = LaneId::new(1);
+        let to = LaneId::new(4);
+        assert_eq!(
+            road.route_for(VehicleKind::Bus, from, to),
+            Some((6, vec![MovementId::new(5), MovementId::new(6)])),
+        );
+        assert_eq!(
+            road.route_for_length(VehicleKind::Bus, from, to, NonZeroU32::new(10_000).unwrap(),),
+            Some((9, vec![MovementId::new(1), MovementId::new(2)])),
+        );
+        assert_eq!(
+            road.route(from, to),
+            Some((6, vec![MovementId::new(3), MovementId::new(4)])),
+        );
+        assert_eq!(road.route_for(VehicleKind::Tram, from, to), None);
+        assert_eq!(road.lane_travel_ticks(to), Some(3));
+        assert_eq!(road.lane_travel_ticks(LaneId::new(9)), None);
+    }
+
+    #[test]
+    fn managed_vehicle_waits_for_release_at_the_end_of_each_route() {
+        let make_road = || {
+            let mut stop = lane(2, 3, 15_000, VehicleKind::Bus);
+            stop.allowed.push(VehicleKind::Car);
+            let mut start = lane(1, 2, 15_000, VehicleKind::Bus);
+            start.discharge.millimetres = NonZeroU32::new(10_000).unwrap();
+            road(
+                vec![start, stop, lane(3, 1, 10_000, VehicleKind::Bus)],
+                vec![movement(1, 1, 2), movement(2, 2, 3)],
+                Vec::new(),
+            )
+        };
+        let mut road = make_road();
+        let (start, stop, terminal) = (LaneId::new(1), LaneId::new(2), LaneId::new(3));
+        let id = VehicleId::new(10);
+        let bus = QueueEntry::Vehicle {
+            id,
+            kind: VehicleKind::Bus,
+            length_mm: NonZeroU32::new(10_000).unwrap(),
+        };
+        let route = [MovementId::new(1)];
+        assert!(!road.enter_vehicle(start, bus.clone(), &[MovementId::new(2)], Tick::new(0)));
+        assert!(!road.enter_vehicle(
+            start,
+            QueueEntry::PrivateCars(NonZeroU32::MIN),
+            &route,
+            Tick::new(0),
+        ));
+        assert!(road.enter_vehicle(start, bus.clone(), &route, Tick::new(0)));
+        assert!(!road.enter_vehicle(stop, bus, &[], Tick::new(0)));
+        assert!(!road.park_vehicle(id, Tick::new(0)));
+
+        road.tick(Tick::new(1));
+        assert_eq!(
+            road.managed_vehicles().collect::<Vec<_>>(),
+            vec![(id, start, VehicleKind::Bus)],
+        );
+        road.tick(Tick::new(2));
+        assert_eq!(road.enter_cars(stop, &[], 1, Tick::new(2), 12), 1);
+        road.tick(Tick::new(3));
+        road.tick(Tick::new(4));
+        assert_eq!(road.vehicle_at_stop(id, Tick::new(4)), None);
+        assert!(!road.depart_vehicle(id, &[MovementId::new(2)], Tick::new(4)));
+        road.tick(Tick::new(5));
+        assert_eq!(road.vehicle_at_stop(id, Tick::new(5)), Some(stop));
+        assert_eq!(
+            road.observe(stop, Tick::new(5)).unwrap().wait_reason,
+            Some(WaitReason::VehicleStop),
+        );
+
+        let (lanes, junctions) = road.snapshot();
+        let mut road = make_road();
+        road.restore(Tick::new(5), lanes, junctions).unwrap();
+        road.tick(Tick::new(6));
+        assert_eq!(road.vehicle_at_stop(id, Tick::new(6)), Some(stop));
+        assert_eq!(
+            road.observe(stop, Tick::new(6)).unwrap().occupied_mm,
+            15_000
+        );
+        assert!(road.car_arrivals().next().is_none());
+        assert!(!road.depart_vehicle(id, &route, Tick::new(6)));
+        assert!(road.depart_vehicle(id, &[MovementId::new(2)], Tick::new(7)));
+
+        road.tick(Tick::new(7));
+        assert_eq!(
+            road.observe(stop, Tick::new(7)).unwrap().occupied_mm,
+            15_000
+        );
+        road.tick(Tick::new(8));
+        assert_eq!(road.observe(stop, Tick::new(8)).unwrap().occupied_mm, 5_000);
+        assert!(!road.park_vehicle(id, Tick::new(8)));
+        road.tick(Tick::new(9));
+        assert_eq!(road.car_arrivals().collect::<Vec<_>>(), vec![(12, 1)]);
+        assert_eq!(road.vehicle_at_stop(id, Tick::new(9)), Some(terminal));
+        assert!(road.park_vehicle(id, Tick::new(9)));
+        assert_eq!(road.observe(terminal, Tick::new(9)).unwrap().occupied_mm, 0);
+        assert!(road.managed_vehicles().next().is_none());
     }
 
     #[test]

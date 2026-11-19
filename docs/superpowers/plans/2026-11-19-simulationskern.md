@@ -113,6 +113,8 @@ Ein `CommandReceipt` enthält Tick, Eingabesequenz, betroffene IDs und fachliche
 
 **Dateien** `crates/sim-core/src/{service,routing,traffic,observe}.rs`, `crates/sim-core/tests/service.rs`.
 
+**Zwischenstand.** Linienfahrzeuge fahren mit stabiler ID, belegter Spur, wiederkehrenden Abfahrtsaufträgen und Mindesthalt. Ausfall und tatsächliche Abfahrt sind beobachtbar. Das Fahrplanrouting berechnet Umsteigewege. Der Prozessvergleich mitten im Halt ist implementiert. Als Nächstes die Fahrgastmengen durch Zugang, Haltewarteschlange, Fahrzeug und Umstieg führen und die Kapazitäts- und Anschlussfälle abnehmen.
+
 - [ ] `service` testet 12 Wartende, 8 freie Plätze → acht fahren, vier behalten ihren ursprünglichen Ankunftstick. Vier Umsteiger mit zwei Ticks Restgehzeit sind genau beim zweiten Tick verfügbar. Bei drei Ticks Mindesthalt darf der folgende Pkw auf der gleichen Spur vorher nicht passieren. Vergleichsläufe mit geändertem Takt weisen verpassten bzw. erreichten Anschluss und eine niedrigere Gesamtreisezeit aus. Fehlende Fahrzeuge erzeugen Verspätung oder Ausfall.
 - [ ] `cargo test -p sim-core --test service` rot prüfen.
 - [ ] Intern `ServiceState::tick_stops(&mut self, tick: Tick, …)` vor Bewegungsplanung aufrufen. Genau ein Fahrzeug pro Einsatz, Abfahrtsaufträge getrennt von der Flotte. Erst Ausstieg, danach Einstieg stabil nach Ankunft; endliche Halteplätze, Mindesthalt plus Fahrgastwechsel, Umstiegswege zum konkreten Halt. Gleisberechtigung und Halt in Bucht oder auf Spur beachten. Noch fällige Abfahrten bei Taktänderung erhalten, künftige Aufträge aus dem neuen Takt erzeugen. Eine Abfahrt verfällt spätestens beim nächsten geplanten Auftrag derselben Richtung, wenn sie bis dahin keinem Fahrzeug zugewiesen wurde.

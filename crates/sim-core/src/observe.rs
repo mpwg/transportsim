@@ -1,4 +1,7 @@
-use crate::{BuildingId, DemandObservation, JourneyOption, LaneId, LaneObservation, Tick, ZoneId};
+use crate::{
+    BuildingId, DemandObservation, JourneyOption, LaneId, LaneObservation, ServiceObservation,
+    Tick, TimetableObservation, ZoneId,
+};
 use std::fmt;
 
 /// Read-only requests against the last completed boundary.
@@ -6,6 +9,8 @@ use std::fmt;
 pub enum Query {
     Clock,
     Demand,
+    Service,
+    TimetableJourney { from: ZoneId, to: ZoneId },
     Journeys { from: ZoneId, to: ZoneId },
     Building(BuildingId),
     Lane(LaneId),
@@ -16,6 +21,8 @@ pub enum Query {
 pub enum Observation {
     Clock(ClockObservation),
     Demand(DemandObservation),
+    Service(ServiceObservation),
+    TimetableJourney(Option<TimetableObservation>),
     Journeys(Vec<JourneyOption>),
     Building(BuildingId),
     Lane(LaneObservation),

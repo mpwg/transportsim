@@ -2,6 +2,7 @@ use crate::{
     BuildingId, JunctionSpec, LaneSpec, MovementSpec, RoadValidationError, Tick, TrafficSeed,
 };
 use crate::{DemandError, DemandSpec, demand::DemandState, traffic::RoadState};
+use crate::{QueueEntry, ServiceError, ServiceSpec, service::Service};
 use std::{collections::BTreeSet, fmt, num::NonZeroU64};
 
 /// Initial conditions supplied by a scenario author.
@@ -15,6 +16,7 @@ pub struct Scenario {
     pub junctions: Vec<JunctionSpec>,
     pub traffic: Vec<TrafficSeed>,
     pub demand: DemandSpec,
+    pub service: ServiceSpec,
 }
 
 impl Scenario {
@@ -27,6 +29,7 @@ impl Scenario {
             junctions: Vec::new(),
             traffic: Vec::new(),
             demand: DemandSpec::default(),
+            service: ServiceSpec::default(),
         }
     }
 }
@@ -61,6 +64,7 @@ pub enum ValidationError {
     DuplicateBuildingId { id: BuildingId, index: usize },
     Road(RoadValidationError),
     Demand(DemandError),
+    Service(ServiceError),
 }
 
 impl fmt::Display for ValidationError {
@@ -68,6 +72,7 @@ impl fmt::Display for ValidationError {
         match self {
             Self::Road(error) => error.fmt(out),
             Self::Demand(error) => error.fmt(out),
+            Self::Service(error) => error.fmt(out),
             Self::DuplicateBuildingId { id, index } => {
                 write!(
                     out,
@@ -86,6 +91,7 @@ pub(crate) struct World {
     pub(crate) buildings: BTreeSet<BuildingId>,
     pub(crate) road: RoadState,
     pub(crate) demand: DemandState,
+    pub(crate) service: Service,
 }
 
 impl World {
@@ -96,6 +102,14 @@ impl World {
                 return Err(ValidationError::DuplicateBuildingId { id, index });
             }
         }
+        let seeded_vehicles: BTreeSet<_> = scenario
+            .traffic
+            .iter()
+            .filter_map(|seed| match seed.entry {
+                QueueEntry::Vehicle { id, .. } => Some(id),
+                QueueEntry::PrivateCars(_) => None,
+            })
+            .collect();
         let road = RoadState::new(
             scenario.lanes,
             scenario.movements,
@@ -104,10 +118,18 @@ impl World {
         )
         .map_err(ValidationError::Road)?;
         let demand = DemandState::new(scenario.demand, &road).map_err(ValidationError::Demand)?;
+        let service = Service::new(
+            scenario.service,
+            &road,
+            |id| demand.contains_zone(id),
+            |id| seeded_vehicles.contains(&id),
+        )
+        .map_err(ValidationError::Service)?;
         Ok(Self {
             buildings,
             road,
             demand,
+            service,
         })
     }
 }

@@ -1,3 +1,5 @@
+pub(crate) mod transit;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{FootEdgeId, LaneId, MovementId};

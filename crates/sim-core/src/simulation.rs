@@ -144,7 +144,9 @@ impl Simulation {
             self.world
                 .demand
                 .tick_before_road(tick, &mut self.world.road);
+            self.world.service.tick(tick, &mut self.world.road);
             self.world.road.tick(tick);
+            self.world.service.after_road(tick, &self.world.road);
             self.world.demand.after_road(tick, &self.world.road);
         }
         self.traffic = end;
@@ -170,6 +172,20 @@ impl Simulation {
                 paused: self.paused,
                 growth_paused: self.growth_paused,
             })),
+            Query::TimetableJourney { from, to } => {
+                for zone in [from, to] {
+                    if !self.world.demand.contains_zone(zone) {
+                        return Err(QueryError::UnknownZone(zone));
+                    }
+                }
+                Ok(Observation::TimetableJourney(self.world.service.timetable(
+                    from,
+                    to,
+                    self.traffic,
+                    &self.world.demand,
+                )))
+            }
+            Query::Service => Ok(Observation::Service(self.world.service.observe())),
             Query::Demand => Ok(Observation::Demand(self.world.demand.observe())),
             Query::Journeys { from, to } => {
                 for zone in [from, to] {

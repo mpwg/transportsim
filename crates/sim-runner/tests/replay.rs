@@ -379,3 +379,75 @@ fn checkpoint_can_be_updated_in_place_but_cannot_replace_its_scenario() {
     let reopened = summary(run(&[("--load", checkpoint.as_os_str())]));
     assert_eq!(reopened, advanced);
 }
+
+#[test]
+fn new_process_resumes_a_bus_mid_dwell() {
+    use serde_json::json;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = dir.path().join("service.json");
+    let checkpoint = dir.path().join("checkpoint.json");
+    let full_trace = dir.path().join("full.jsonl");
+    let suffix_trace = dir.path().join("suffix.jsonl");
+    let lanes: Vec<_> = (1..=2)
+        .map(|id| {
+            json!({
+                "id": id, "capacity_mm": 50000, "travel_ticks": 1,
+                "discharge":{"millimetres": 50000, "ticks": 1}, "allowed":["bus"]
+            })
+        })
+        .collect();
+    let moves: Vec<_> = [(1, 2), (2, 1)].into_iter().map(|(from, to)| json!({
+        "id": from, "from": from, "to": to, "junction": 1, "conflict_zones":[1], "priority": 0
+    })).collect();
+    let stops: Vec<_> = (1..=2)
+        .map(|id| {
+            json!({
+                "id": id, "zone": id, "lane": id, "capacity": 20,
+                "minimum_dwell": 3, "passengers_per_tick": 10
+            })
+        })
+        .collect();
+    let zones: Vec<_> = (1..=2)
+        .map(|id| {
+            json!({
+                "id": id, "residents": 0, "jobs": 0, "shops": 0, "road_access": null
+            })
+        })
+        .collect();
+    let data = json!({
+        "seed": 7, "start": 0, "development_period_ticks": 86400, "building_ids": [],
+        "lanes": lanes, "movements": moves, "junctions": [{"id":1, "phases":[]}], "traffic":[],
+        "demand": { "zones": zones },
+        "service": {
+            "stops": stops,
+            "lines": [{"id":1, "kind":"bus", "stops":[1,2], "headway":20, "first_departure":1}],
+            "fleet": [{"id":12, "line":1, "length_mm":12000, "capacity":8}]
+        }
+    });
+    fs::write(&fixture, serde_json::to_vec(&data).unwrap()).unwrap();
+    let baseline = summary(run(&[
+        ("--scenario", fixture.as_os_str()),
+        ("--until-tick", OsStr::new("7")),
+        ("--trace", full_trace.as_os_str()),
+    ]));
+    let at_halt = summary(run(&[
+        ("--scenario", fixture.as_os_str()),
+        ("--until-tick", OsStr::new("3")),
+        ("--save", checkpoint.as_os_str()),
+    ]));
+    assert_eq!(at_halt["lanes"][0]["wait_reason"], "vehicle_stop");
+    let continued = summary(run(&[
+        ("--load", checkpoint.as_os_str()),
+        ("--until-tick", OsStr::new("7")),
+        ("--trace", suffix_trace.as_os_str()),
+    ]));
+    let tail = trace(&suffix_trace);
+    assert_eq!(tail, trace(&full_trace)[3..]);
+    assert_eq!(tail[1]["tick"], 5);
+    assert_eq!(
+        tail[1]["lanes"][0]["departure"]["entry"]["vehicle"]["id"],
+        12
+    );
+    assert_eq!(continued, baseline);
+}

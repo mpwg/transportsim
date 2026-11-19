@@ -258,6 +258,14 @@ impl DemandState {
         self.zones.contains_key(&zone)
     }
 
+    pub(crate) fn walk_route(
+        &self,
+        from: ZoneId,
+        to: ZoneId,
+    ) -> Option<(u64, Vec<crate::FootEdgeId>)> {
+        self.walking.route(from, to)
+    }
+
     fn options(
         &self,
         origin: ZoneId,

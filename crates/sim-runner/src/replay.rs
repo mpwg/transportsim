@@ -252,6 +252,7 @@ fn wait_reason(reason: WaitReason) -> &'static str {
         WaitReason::DischargeLimit => "discharge_limit",
         WaitReason::TargetFull => "target_full",
         WaitReason::Conflict => "conflict",
+        WaitReason::VehicleStop => "vehicle_stop",
         _ => "unknown",
     }
 }

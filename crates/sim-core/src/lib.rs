@@ -7,6 +7,7 @@ mod network;
 mod observe;
 mod routing;
 mod save;
+mod service;
 mod simulation;
 mod traffic;
 mod walking;
@@ -31,5 +32,10 @@ pub use demand::{
     ActiveJourney, DemandError, DemandObservation, DemandProfile, DemandSpec, TripPurpose, ZoneId,
     ZoneSpec,
 };
-pub use routing::{JourneyMode, JourneyOption};
+pub use routing::{JourneyMode, JourneyOption, transit::TransitCost};
 pub use walking::{FootEdgeId, FootEdgeSpec, WalkingError};
+
+pub use service::{
+    FleetSpec, LineId, LineObservation, LineSpec, ServiceError, ServiceObservation, ServiceSpec,
+    ServiceVehicleObservation, StopId, StopSpec, TimetableObservation,
+};
