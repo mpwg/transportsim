@@ -1,4 +1,4 @@
-use crate::{BuildingId, Tick};
+use crate::{BuildingId, LaneId, LaneObservation, Tick};
 use std::fmt;
 
 /// Read-only requests against the last completed boundary.
@@ -6,6 +6,7 @@ use std::fmt;
 pub enum Query {
     Clock,
     Building(BuildingId),
+    Lane(LaneId),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -13,6 +14,7 @@ pub enum Query {
 pub enum Observation {
     Clock(ClockObservation),
     Building(BuildingId),
+    Lane(LaneObservation),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -29,11 +31,13 @@ pub struct ClockObservation {
 #[non_exhaustive]
 pub enum QueryError {
     UnknownBuilding(BuildingId),
+    UnknownLane(LaneId),
 }
 
 impl fmt::Display for QueryError {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnknownLane(id) => write!(out, "unknown lane ID {}", id.get()),
             Self::UnknownBuilding(id) => write!(out, "unknown building ID {}", id.get()),
         }
     }

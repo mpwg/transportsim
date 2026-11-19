@@ -74,10 +74,10 @@ Ein `CommandReceipt` enthält Tick, Eingabesequenz, betroffene IDs und fachliche
 
 **Dateien** `crates/sim-core/src/{network,traffic,junction,simulation,observe}.rs`, `crates/sim-core/tests/bridge.rs`.
 
-- [ ] `bridge` testet `[3 Pkw links, Bus 12 gerade, 5 Pkw gerade]` bei Geradeausgrün und roter Linksbewegung. Erwartet sind null Übertritte und Wartegrund am Kopf. Mit freiem legalem Ziel und Freigabe muss Bus 12 anschließend als einzelnes Fahrzeug kreuzen. Bei vollem Ziel bleibt er stehen. Für zwei gleichrangige unverändert bereite Zufahrten mit einem Slot lautet die erwartete Folge A, B, A, B. Fahrt über einen leeren Abschnitt benötigt weiterhin seine freie Fahrzeit.
-- [ ] `cargo test -p sim-core --test bridge` rot prüfen.
-- [ ] `RoadState::plan_moves(&self, tick: Tick) -> Vec<MoveRequest>` und `RoadState::commit_moves(&mut self, moves: &[GrantedMove])` intern hinter der Tickgrenze verdrahten. Bewegungen aus einem gemeinsamen Vorzustand planen und Platz sowie Konfliktfelder vor der Übernahme reservieren. Einen halben Pkw Durchsatz pro Grün-Tick als zwei Ticks pro Übertritt testen. Langes Rot darf daraus keinen Vorrat erzeugen. Getrennte Gleisfreigabe erhält einen eigenen Test.
-- [ ] Einzeltest und Workspace-Prüfungen grün. Commit `feat: Spurwarteschlangen und Kreuzungsfreigaben`.
+- [x] `bridge` testet `[3 Pkw links, Bus 12 gerade, 5 Pkw gerade]` bei Geradeausgrün und roter Linksbewegung. Erwartet sind null Übertritte und Wartegrund am Kopf. Mit freiem legalem Ziel und Freigabe muss Bus 12 anschließend als einzelnes Fahrzeug kreuzen. Bei vollem Ziel bleibt er stehen. Für zwei gleichrangige unverändert bereite Zufahrten mit einem Slot lautet die erwartete Folge A, B, A, B. Fahrt über einen leeren Abschnitt benötigt weiterhin seine freie Fahrzeit.
+- [x] `cargo test -p sim-core --test bridge` rot prüfen.
+- [x] `RoadState::plan_moves(&self, tick: Tick) -> Vec<MoveRequest>` und `RoadState::commit_moves(&mut self, moves: &[GrantedMove])` intern hinter der Tickgrenze verdrahten. Bewegungen aus einem gemeinsamen Vorzustand planen und Platz sowie Konfliktfelder vor der Übernahme reservieren. Einen halben Pkw Durchsatz pro Grün-Tick als zwei Ticks pro Übertritt testen. Langes Rot darf daraus keinen Vorrat erzeugen. Getrennte Gleisfreigabe erhält einen eigenen Test.
+- [x] Einzeltest und Workspace-Prüfungen grün. Commit `feat: Spurwarteschlangen und Kreuzungsfreigaben`.
 
 ### 3. Spielstand V1 und Befehlswiedergabe
 

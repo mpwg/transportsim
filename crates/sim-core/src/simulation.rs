@@ -135,6 +135,11 @@ impl Simulation {
             .development_ticks
             .checked_add(growth_ticks)
             .ok_or(AdvanceError::DevelopmentClockOverflow)?;
+        for offset in 0..ticks {
+            self.world
+                .road
+                .tick(Tick::new(start.seconds() + offset + 1));
+        }
         self.traffic = end;
         self.development_ticks = development;
         Ok(AdvanceReport {
@@ -153,6 +158,12 @@ impl Simulation {
                 paused: self.paused,
                 growth_paused: self.growth_paused,
             })),
+            Query::Lane(id) => self
+                .world
+                .road
+                .observe(id, self.traffic)
+                .map(Observation::Lane)
+                .ok_or(QueryError::UnknownLane(id)),
             Query::Building(id) => {
                 if self.world.buildings.contains(&id) {
                     Ok(Observation::Building(id))

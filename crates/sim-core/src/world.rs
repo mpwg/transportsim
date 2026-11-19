@@ -1,4 +1,7 @@
-use crate::{BuildingId, Tick};
+use crate::traffic::RoadState;
+use crate::{
+    BuildingId, JunctionSpec, LaneSpec, MovementSpec, RoadValidationError, Tick, TrafficSeed,
+};
 use std::{collections::BTreeSet, fmt, num::NonZeroU64};
 
 /// Initial conditions supplied by a scenario author.
@@ -7,6 +10,10 @@ use std::{collections::BTreeSet, fmt, num::NonZeroU64};
 pub struct Scenario {
     pub start: Tick,
     pub building_ids: Vec<BuildingId>,
+    pub lanes: Vec<LaneSpec>,
+    pub movements: Vec<MovementSpec>,
+    pub junctions: Vec<JunctionSpec>,
+    pub traffic: Vec<TrafficSeed>,
 }
 
 impl Scenario {
@@ -14,6 +21,10 @@ impl Scenario {
         Self {
             start,
             building_ids: Vec::new(),
+            lanes: Vec::new(),
+            movements: Vec::new(),
+            junctions: Vec::new(),
+            traffic: Vec::new(),
         }
     }
 }
@@ -46,11 +57,13 @@ impl Default for RuleSet {
 #[non_exhaustive]
 pub enum ValidationError {
     DuplicateBuildingId { id: BuildingId, index: usize },
+    Road(RoadValidationError),
 }
 
 impl fmt::Display for ValidationError {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Road(error) => error.fmt(out),
             Self::DuplicateBuildingId { id, index } => {
                 write!(
                     out,
@@ -67,6 +80,7 @@ impl std::error::Error for ValidationError {}
 #[derive(Debug)]
 pub(crate) struct World {
     pub(crate) buildings: BTreeSet<BuildingId>,
+    pub(crate) road: RoadState,
 }
 
 impl World {
@@ -77,6 +91,13 @@ impl World {
                 return Err(ValidationError::DuplicateBuildingId { id, index });
             }
         }
-        Ok(Self { buildings })
+        let road = RoadState::new(
+            scenario.lanes,
+            scenario.movements,
+            scenario.junctions,
+            scenario.traffic,
+        )
+        .map_err(ValidationError::Road)?;
+        Ok(Self { buildings, road })
     }
 }
