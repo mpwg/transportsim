@@ -3,7 +3,7 @@ use std::io::Write;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sim_core::{
-    AdvanceReport, ClockObservation, Command, EditCommand, Observation, Query, QueueEntry,
+    ClockObservation, Command, EditCommand, Marker, MarkerId, Observation, Query, QueueEntry,
     Simulation, VehicleKind, WaitReason,
 };
 
@@ -24,26 +24,31 @@ enum CommandInput {
         ticks: std::num::NonZeroU32,
     },
     CommitEdit(EditCommand),
+    UndoEdit,
+    SetMarker(Marker),
+    RemoveMarker(MarkerId),
     Step,
 }
 
 impl CommandInput {
-    fn apply(self, simulation: &mut Simulation) -> Result<Option<AdvanceReport>> {
+    fn apply(self, simulation: &mut Simulation) -> Result<u64> {
         let command = match self {
             Self::SetPaused(paused) => Command::SetPaused(paused),
             Self::SetGrowthPaused(paused) => Command::SetGrowthPaused(paused),
             Self::SetLineHeadway { line, ticks } => Command::SetLineHeadway { line, ticks },
             Self::CommitEdit(edit) => Command::CommitEdit(edit),
-            Self::Step => return Ok(Some(simulation.step()?)),
+            Self::UndoEdit => Command::UndoEdit,
+            Self::SetMarker(marker) => Command::SetMarker(marker),
+            Self::RemoveMarker(id) => Command::RemoveMarker(id),
+            Self::Step => return Ok(simulation.step()?.end.seconds()),
         };
-        simulation.apply(command)?;
-        Ok(None)
+        Ok(simulation.apply(command)?.tick.seconds())
     }
 }
 
 pub(crate) struct Replay {
     start: u64,
-    target: u64,
+    target: Option<u64>,
     commands: Vec<TimedCommand>,
 }
 
@@ -54,21 +59,23 @@ impl Replay {
         commands_json: Option<&[u8]>,
     ) -> Result<Self> {
         let start = clock(sim)?.traffic.seconds();
-        let target = target.unwrap_or(start);
-        ensure!(
-            target >= start,
-            "target tick {target} precedes current tick {start}"
-        );
+        if let Some(target) = target {
+            ensure!(
+                target >= start,
+                "target tick {target} precedes current tick {start}"
+            );
+        }
         let commands: Vec<TimedCommand> = if let Some(bytes) = commands_json {
             serde_json::from_slice(bytes).context("invalid command list JSON")?
         } else {
             Vec::new()
         };
+        let mut minimum_tick = start;
         let mut previous_tick = start;
         for command in &commands {
             ensure!(
-                command.tick >= start,
-                "command at tick {} precedes current tick {start}",
+                command.tick >= minimum_tick,
+                "command at tick {} precedes current tick {minimum_tick}",
                 command.tick
             );
             ensure!(
@@ -76,7 +83,13 @@ impl Replay {
                 "command at tick {} is out of order after tick {previous_tick}",
                 command.tick
             );
-            previous_tick = command.tick;
+            if matches!(command.command, CommandInput::UndoEdit) {
+                // Resolve the next segment's lower bound from the undo receipt at runtime.
+                minimum_tick = 0;
+                previous_tick = 0;
+            } else {
+                previous_tick = command.tick;
+            }
         }
         Ok(Self {
             start,
@@ -91,10 +104,11 @@ impl Replay {
         mut trace: Option<&mut dyn Write>,
     ) -> Result<()> {
         let mut tick = self.start;
+        let limit = self.target.unwrap_or(self.start);
         for entry in self
             .commands
             .into_iter()
-            .take_while(|entry| entry.tick <= self.target)
+            .take_while(|entry| entry.tick <= limit)
         {
             ensure!(
                 entry.tick >= tick,
@@ -103,20 +117,21 @@ impl Replay {
             );
             advance_to(sim, &mut tick, entry.tick, &mut trace)?;
             ensure!(
-                !matches!(entry.command, CommandInput::Step) || tick < self.target,
-                "single step at tick {tick} would exceed requested target {}",
-                self.target,
+                !matches!(entry.command, CommandInput::Step) || tick < limit,
+                "single step at tick {tick} would exceed requested target {limit}",
             );
-            if let Some(report) = entry
+            let next_tick = entry
                 .command
                 .apply(sim)
-                .with_context(|| format!("cannot apply command at tick {tick}"))?
-            {
-                tick = report.end.seconds();
+                .with_context(|| format!("cannot apply command at tick {tick}"))?;
+            if next_tick > tick {
                 emit_trace(sim, &mut trace)?;
             }
+            tick = next_tick;
         }
-        advance_to(sim, &mut tick, self.target, &mut trace)?;
+        if let Some(target) = self.target {
+            advance_to(sim, &mut tick, target, &mut trace)?;
+        }
         Ok(())
     }
 }

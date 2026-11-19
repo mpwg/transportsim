@@ -411,24 +411,13 @@ impl Taxi {
             .map(|request| (request.cohort, request.count))
     }
 
-    pub(crate) fn cohorts(&self) -> impl Iterator<Item = (u64, ZoneId, ZoneId, u32)> + '_ {
-        self.current
-            .queue
-            .iter()
-            .chain(
-                self.current
-                    .vehicles
-                    .values()
-                    .flat_map(Progress::passengers),
-            )
-            .map(|request| {
-                (
-                    request.cohort,
-                    request.origin,
-                    request.destination,
-                    request.count,
-                )
-            })
+    pub(crate) fn requests(&self) -> impl Iterator<Item = &TaxiRequest> {
+        self.current.queue.iter().chain(
+            self.current
+                .vehicles
+                .values()
+                .flat_map(Progress::passengers),
+        )
     }
 
     pub(crate) fn observe(&self, tick: Tick, road: &RoadState) -> TaxiObservation {

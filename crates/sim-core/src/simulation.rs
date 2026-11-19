@@ -3,8 +3,13 @@ use crate::world::World;
 use crate::{
     ClockObservation, Observation, Query, QueryError, RuleSet, Scenario, Tick, ValidationError,
 };
+use crate::{EditAction, Marker, MarkerAnchor, MarkerId, MarkerObservation, UndoObservation};
 use crate::{EditCommand, EditError, EditPreview, edit};
-use std::{collections::BTreeSet, fmt, num::NonZeroU32};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    num::NonZeroU32,
+};
 
 /// A mutation applied at a completed simulation boundary.
 #[non_exhaustive]
@@ -12,12 +17,16 @@ pub enum Command {
     SetPaused(bool),
     SetGrowthPaused(bool),
     CommitEdit(EditCommand),
+    UndoEdit,
+    SetMarker(Marker),
+    RemoveMarker(MarkerId),
     SetLineHeadway { line: LineId, ticks: NonZeroU32 },
 }
 
 #[derive(Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct CommandReceipt {
+    /// Sequence at the returned boundary. An undo rewinds the sequence as well.
     pub sequence: u64,
     pub tick: Tick,
     pub edit: Option<EditPreview>,
@@ -29,11 +38,15 @@ pub enum CommandError {
     SequenceOverflow,
     UnknownLine(LineId),
     Edit(EditError),
+    NoUndo,
+    UnknownMarker(MarkerId),
 }
 
 impl fmt::Display for CommandError {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NoUndo => out.write_str("no build is available to undo"),
+            Self::UnknownMarker(id) => write!(out, "unknown marker ID {}", id.get()),
             Self::Edit(error) => error.fmt(out),
             Self::UnknownLine(line) => write!(out, "unknown line ID {}", line.get()),
             Self::SequenceOverflow => out.write_str("command sequence overflow"),
@@ -84,6 +97,8 @@ pub struct Simulation {
     pub(crate) growth_paused: bool,
     pub(crate) scenario: Scenario,
     pub(crate) seed: u64,
+    pub(crate) undo: Option<Box<Simulation>>,
+    pub(crate) markers: BTreeMap<MarkerId, Marker>,
 }
 
 impl Simulation {
@@ -116,6 +131,8 @@ impl Simulation {
             network_revision: 0,
             paused: false,
             growth_paused: false,
+            undo: None,
+            markers: BTreeMap::new(),
         })
     }
 
@@ -130,33 +147,74 @@ impl Simulation {
     }
 
     pub fn apply(&mut self, command: Command) -> Result<CommandReceipt, CommandError> {
+        if matches!(command, Command::UndoEdit) {
+            let before = self.undo.take().ok_or(CommandError::NoUndo)?;
+            *self = *before;
+            return Ok(self.receipt(None));
+        }
         let sequence = self
             .sequence
             .checked_add(1)
             .ok_or(CommandError::SequenceOverflow)?;
-        let mut receipt_edit = None;
         match command {
             Command::SetPaused(paused) => self.paused = paused,
             Command::SetGrowthPaused(paused) => self.growth_paused = paused,
-            Command::CommitEdit(edit) => {
-                let prepared = edit::prepare(self, &edit).map_err(CommandError::Edit)?;
-                self.scenario = prepared.scenario;
-                self.world = prepared.world;
-                self.network_revision = prepared.preview.revision;
-                receipt_edit = Some(prepared.preview);
+            Command::SetMarker(marker) => {
+                self.markers.insert(marker.id, marker);
+            }
+            Command::RemoveMarker(id) => {
+                self.markers
+                    .remove(&id)
+                    .ok_or(CommandError::UnknownMarker(id))?;
+            }
+            Command::CommitEdit(command) => {
+                let prepared = edit::prepare(self, &command).map_err(CommandError::Edit)?;
+                return Ok(self.commit(prepared, sequence));
             }
             Command::SetLineHeadway { line, ticks } => {
-                if !self.world.service.set_headway(line, self.traffic, ticks) {
-                    return Err(CommandError::UnknownLine(line));
-                }
+                let command = EditCommand {
+                    expected_revision: self.network_revision,
+                    actions: vec![EditAction::SetHeadway { line, ticks }],
+                };
+                let prepared = edit::prepare(self, &command).map_err(|error| match error {
+                    EditError::MissingLine(id) => CommandError::UnknownLine(id),
+                    error => CommandError::Edit(error),
+                })?;
+                return Ok(self.commit(prepared, sequence));
             }
+            Command::UndoEdit => unreachable!("undo restores the command sequence itself"),
         }
         self.sequence = sequence;
-        Ok(CommandReceipt {
-            sequence,
+        Ok(self.receipt(None))
+    }
+
+    fn receipt(&self, edit: Option<EditPreview>) -> CommandReceipt {
+        CommandReceipt {
+            sequence: self.sequence,
             tick: self.traffic,
-            edit: receipt_edit,
-        })
+            edit,
+        }
+    }
+
+    fn commit(&mut self, prepared: edit::PreparedEdit, sequence: u64) -> CommandReceipt {
+        let candidate = Self {
+            world: prepared.world,
+            scenario: prepared.scenario,
+            network_revision: prepared.preview.revision,
+            sequence,
+            undo: None,
+            markers: self.markers.clone(),
+            seed: self.seed,
+            rules: self.rules,
+            traffic: self.traffic,
+            development_ticks: self.development_ticks,
+            paused: self.paused,
+            growth_paused: self.growth_paused,
+        };
+        let mut before = std::mem::replace(self, candidate);
+        before.undo = None;
+        self.undo = Some(Box::new(before));
+        self.receipt(Some(prepared.preview))
     }
 
     /// Advances whole traffic ticks. While paused, the number executed is zero.
@@ -222,6 +280,27 @@ impl Simulation {
 
     pub fn inspect(&self, query: Query) -> Result<Observation, QueryError> {
         match query {
+            Query::Undo => Ok(Observation::Undo(self.undo.as_ref().map(|before| {
+                UndoObservation {
+                    target_tick: before.traffic,
+                }
+            }))),
+            Query::Markers => Ok(Observation::Markers(
+                self.markers
+                    .values()
+                    .map(|marker| {
+                        let anchor_present = marker.anchor.is_some_and(|anchor| match anchor {
+                            MarkerAnchor::Building(id) => self.world.buildings.contains(&id),
+                            MarkerAnchor::Lane(id) => self.world.road.contains_lane(id),
+                            MarkerAnchor::Stop(id) => self.world.service.stop_zone(id).is_some(),
+                        });
+                        MarkerObservation {
+                            marker: marker.clone(),
+                            anchor_present,
+                        }
+                    })
+                    .collect(),
+            )),
             Query::Clock => Ok(Observation::Clock(ClockObservation {
                 traffic: self.traffic,
                 development_ticks: self.development_ticks,

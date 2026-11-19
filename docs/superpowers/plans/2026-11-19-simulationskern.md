@@ -140,12 +140,12 @@ Ein `CommandReceipt` enthält Tick, Eingabesequenz, betroffene IDs und fachliche
 
 ### 9. Undo, Ortsmarken und vollständige Ladevalidierung
 
-**Dateien** `crates/sim-core/src/{simulation,edit,observe,save.rs,save/v1.rs}`, `crates/sim-core/tests/{edit,save_format,continuation}.rs`.
+**Dateien** `crates/sim-core/src/{simulation,edit,marker,observe,save.rs,save/v1.rs}`, `crates/sim-core/tests/{edit,save_format,undo}.rs`.
 
-- [ ] Vor Umbau bei Tick 10 fachlichen Zustand abfragen; danach pausieren, fehlerhaften zweiten Umbau versuchen, weiterschalten, speichern, Prozess neu starten, Undo. Erwartet sind Tick 10, vorherige Welt und leerer Undo-Punkt. Bei entferntem Objekt bleibt die Ortsmarke an ihrer Koordinate. Erneuerter gültiger Umbau ersetzt den vorherigen Wiederherstellungspunkt; keine verschachtelte Historie.
-- [ ] `cargo test -p sim-core --test edit` und `cargo test -p sim-core --test save_format` rot prüfen.
-- [ ] Wiederherstellungspunkt ohne eigene Historie unmittelbar vor erfolgreichem Spielerumbau aufnehmen. Undo stellt Uhren, Regeln, Zufalls- und Verkehrszustände wieder her. Abfragen liefern Zielzeit vor Bestätigung. Vollständigen Validator auch auf den Undo-Punkt anwenden. Tests mit neu berechneter Prüfsumme für doppelte IDs, fehlende Referenzen, überfüllte Spur, unmögliche Zeit, doppelte Fahrzeugposition, ungültige Reservierung, Mengenbilanz und kaputten Undo-Punkt. Nach Ladefehler den laufenden Stand gegen einen Kontrolltick vergleichen.
-- [ ] Einzeltests und Workspace grün. Commit `feat: Umbauten nach Neustart rückgängig machen`.
+- [x] Vor Umbau bei Tick 10 fachlichen Zustand abfragen; danach pausieren, fehlerhaften zweiten Umbau versuchen, weiterschalten, speichern, Prozess neu starten, Undo. Erwartet sind Tick 10, vorherige Welt und leerer Undo-Punkt. Bei entferntem Objekt bleibt die Ortsmarke an ihrer Koordinate. Erneuerter gültiger Umbau ersetzt den vorherigen Wiederherstellungspunkt; keine verschachtelte Historie.
+- [x] `cargo test -p sim-core --test undo` und `cargo test -p sim-core --test save_format` rot prüfen.
+- [x] Wiederherstellungspunkt ohne eigene Historie unmittelbar vor erfolgreichem Spielerumbau aufnehmen. Undo stellt Uhren, Regeln, Zufalls- und Verkehrszustände wieder her. Abfragen liefern Zielzeit vor Bestätigung. Vollständigen Validator auch auf den Undo-Punkt anwenden. Tests mit neu berechneter Prüfsumme für doppelte IDs, fehlende Referenzen, überfüllte Spur, unmögliche Zeit, doppelte Fahrzeugposition, ungültige Reservierung, Mengenbilanz und kaputten Undo-Punkt. Nach Ladefehler den laufenden Stand gegen einen Kontrolltick vergleichen.
+- [x] Einzeltests und Workspace grün. Commit `feat: Umbauten nach Neustart rückgängig machen`.
 
 ## Etappe D · Stadtentwicklung und Abnahme
 

@@ -1,3 +1,4 @@
+use crate::MarkerObservation;
 use crate::taxi::TaxiObservation;
 use crate::{
     BuildingId, DemandObservation, JourneyOption, LaneId, LaneObservation, ServiceObservation,
@@ -10,6 +11,8 @@ use std::fmt;
 #[non_exhaustive]
 pub enum Query {
     Clock,
+    Undo,
+    Markers,
     Demand,
     Service,
     Taxi,
@@ -25,6 +28,8 @@ pub enum Query {
 #[non_exhaustive]
 pub enum Observation {
     Clock(ClockObservation),
+    Undo(Option<UndoObservation>),
+    Markers(Vec<MarkerObservation>),
     Demand(DemandObservation),
     Service(ServiceObservation),
     Taxi(TaxiObservation),
@@ -34,6 +39,13 @@ pub enum Observation {
     Lane(LaneObservation),
     FootEdge(FootEdgeSpec),
     Layout(LayoutSpec),
+}
+
+/// The clock boundary of the most recent reversible build.
+#[derive(Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct UndoObservation {
+    pub target_tick: Tick,
 }
 
 #[derive(Debug, Eq, PartialEq)]

@@ -38,7 +38,7 @@ struct RunArgs {
     /// Apply a JSON list of commands, e.g. [{"tick":5,"command":{"set_paused":true}}].
     #[arg(long, value_name = "PATH")]
     commands: Option<PathBuf>,
-    /// Stop at this absolute traffic tick. Defaults to the starting tick.
+    /// Stop at this absolute traffic tick. Without it, an undo can leave an earlier boundary.
     #[arg(long, value_name = "N")]
     until_tick: Option<u64>,
     /// Write the final checkpoint to this file.

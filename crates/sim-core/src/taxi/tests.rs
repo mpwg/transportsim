@@ -181,7 +181,7 @@ fn checkpoint_continues_both_phases_without_changing_arrivals() {
                 step(tick, &mut restored, &mut restored_road)
             );
         }
-        assert_eq!(restored.cohorts().count(), 0);
+        assert_eq!(restored.requests().count(), 0);
     }
 }
 

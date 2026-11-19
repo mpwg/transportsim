@@ -2,24 +2,30 @@ use std::num::NonZeroU32;
 
 use serde_json::{Value, json};
 use sim_core::{
-    DischargeRate, LaneId, LaneSpec, LoadError, QueueEntry, RoadValidationError, RuleSet, Scenario,
-    Simulation, Tick, TrafficSeed, ValidationError, VehicleKind,
+    DemandProfile, DischargeRate, JunctionId, JunctionSpec, LaneId, LaneSpec, LoadError,
+    MovementId, MovementSpec, QueueEntry, RoadValidationError, RuleSet, Scenario, Simulation,
+    TaxiVehicleSpec, Tick, TrafficSeed, TripPurpose, ValidationError, VehicleId, VehicleKind,
+    ZoneId, ZoneSpec,
 };
 
 const LIMIT: usize = 128 * 1024 * 1024;
 
-fn simulation() -> Simulation {
-    let mut scenario = Scenario::empty(Tick::new(10));
-    scenario.lanes = vec![LaneSpec {
-        id: LaneId::new(7),
+fn lane(id: u64, kind: VehicleKind) -> LaneSpec {
+    LaneSpec {
+        id: LaneId::new(id),
         capacity_mm: NonZeroU32::new(30_000).unwrap(),
         travel_ticks: NonZeroU32::new(1).unwrap(),
         discharge: DischargeRate {
             millimetres: NonZeroU32::new(5_000).unwrap(),
             ticks: NonZeroU32::new(1).unwrap(),
         },
-        allowed: vec![VehicleKind::Car],
-    }];
+        allowed: vec![kind],
+    }
+}
+
+fn simulation() -> Simulation {
+    let mut scenario = Scenario::empty(Tick::new(10));
+    scenario.lanes = vec![lane(7, VehicleKind::Car)];
     scenario.traffic = vec![TrafficSeed {
         lane: LaneId::new(7),
         entry: QueueEntry::PrivateCars(NonZeroU32::new(3).unwrap()),
@@ -29,8 +35,59 @@ fn simulation() -> Simulation {
     Simulation::new_game(scenario, RuleSet::default(), 0).unwrap()
 }
 
+fn taxi_en_route_to_pickup() -> Simulation {
+    let mut scenario = Scenario::empty(Tick::new(0));
+    scenario.lanes = vec![lane(7, VehicleKind::Taxi), lane(8, VehicleKind::Taxi)];
+    let junction = JunctionId::new(1);
+    scenario.junctions.push(JunctionSpec {
+        id: junction,
+        phases: vec![],
+    });
+    scenario.movements = [(1, 7, 8), (2, 8, 7)]
+        .into_iter()
+        .map(|(id, from, to)| MovementSpec {
+            id: MovementId::new(id),
+            from: LaneId::new(from),
+            to: LaneId::new(to),
+            junction,
+            conflict_zones: vec![1],
+            priority: 0,
+        })
+        .collect();
+    scenario.demand.zones = [(1, 7, 1, 0), (2, 8, 0, 1)]
+        .into_iter()
+        .map(|(id, access, residents, jobs)| ZoneSpec {
+            id: ZoneId::new(id),
+            residents,
+            jobs,
+            shops: 0,
+            road_access: Some(LaneId::new(access)),
+        })
+        .collect();
+    scenario.demand.profiles.push(DemandProfile {
+        purpose: TripPurpose::Work,
+        departure_offsets: vec![0],
+        return_offset: 100,
+        rate_numerator: 1,
+        rate_denominator: NonZeroU32::MIN,
+    });
+    scenario.taxi.fleet.push(TaxiVehicleSpec {
+        id: VehicleId::new(42),
+        start: ZoneId::new(2),
+        length_mm: NonZeroU32::new(5_000).unwrap(),
+        capacity: NonZeroU32::MIN,
+    });
+    let mut sim = Simulation::new_game(scenario, RuleSet::default(), 0).unwrap();
+    sim.advance(1).unwrap();
+    sim
+}
+
 fn document() -> Value {
     serde_json::from_slice(&simulation().save().unwrap()).unwrap()
+}
+
+fn taxi_document() -> Value {
+    serde_json::from_slice(&taxi_en_route_to_pickup().save().unwrap()).unwrap()
 }
 
 fn payload_hash(mut payload: Value) -> blake3::Hash {
@@ -175,6 +232,120 @@ fn negative_car_count_is_rejected_with_a_valid_checksum() {
         Simulation::load(&bytes),
         Err(LoadError::Json { .. })
     ));
+}
+
+#[test]
+fn restored_queue_cannot_exceed_lane_capacity() {
+    let mut document = document();
+    document["payload"]["lanes"][0]["queue"][0]["entry"]["private_cars"] = json!(7);
+    let error = Simulation::load(&with_updated_checksum(document)).unwrap_err();
+    assert_eq!(
+        error,
+        LoadError::State(ValidationError::Road(RoadValidationError::OverCapacity(
+            LaneId::new(7)
+        )))
+    );
+}
+
+#[test]
+fn impossible_checkpoint_times_are_rejected() {
+    for (pointer, impossible, field) in [
+        ("/tick", json!(9), "tick"),
+        ("/development_ticks", json!(1), "development_ticks"),
+        (
+            "/lanes/0/queue/0/ready_at",
+            Value::Null,
+            "lanes.queue.ready_at",
+        ),
+    ] {
+        let mut document = document();
+        *document["payload"].pointer_mut(pointer).unwrap() = impossible;
+        let error = Simulation::load(&with_updated_checksum(document)).unwrap_err();
+        assert_eq!(error, LoadError::InvalidState { field });
+    }
+}
+
+#[test]
+fn restored_lane_ids_must_be_unique() {
+    let mut document = taxi_document();
+    document["payload"]["lanes"][1]["id"] = json!(7);
+    let error = Simulation::load(&with_updated_checksum(document)).unwrap_err();
+    assert_eq!(error, LoadError::InvalidState { field: "lanes.id" });
+}
+
+#[test]
+fn restored_vehicle_cannot_occupy_two_lanes() {
+    let mut document = taxi_document();
+    let mut taxi = document["payload"]["lanes"][1]["queue"][0].clone();
+    assert_eq!(taxi["entry"]["vehicle"]["id"], json!(42));
+    taxi["route"] = json!([]);
+    document["payload"]["lanes"][0]["queue"] = json!([taxi]);
+    let error = Simulation::load(&with_updated_checksum(document)).unwrap_err();
+    assert_eq!(
+        error,
+        LoadError::State(ValidationError::Road(
+            RoadValidationError::DuplicateVehicle(VehicleId::new(42))
+        ))
+    );
+}
+
+#[test]
+fn taxi_reservation_requires_an_existing_passenger_cohort() {
+    let mut document = taxi_document();
+    let cohort = document["payload"]
+        .pointer_mut("/taxi/vehicles/42/to_pickup/passengers/0/cohort")
+        .unwrap();
+    *cohort = json!(999);
+    let error = Simulation::load(&with_updated_checksum(document)).unwrap_err();
+    assert_eq!(
+        error,
+        LoadError::InvalidState {
+            field: "demand.taxi"
+        }
+    );
+}
+
+#[test]
+fn taxi_reservation_cannot_predate_its_passenger_cohort() {
+    let mut document = taxi_document();
+    let since = document["payload"]
+        .pointer_mut("/taxi/vehicles/42/to_pickup/passengers/0/since")
+        .unwrap();
+    assert_eq!(*since, json!(1));
+    *since = json!(0);
+    let error = Simulation::load(&with_updated_checksum(document)).err();
+    assert_eq!(
+        error,
+        Some(LoadError::InvalidState {
+            field: "demand.taxi"
+        })
+    );
+}
+
+#[test]
+fn unbalanced_demand_is_rejected_and_running_game_continues() {
+    let mut running = taxi_en_route_to_pickup();
+    let checkpoint = running.save().unwrap();
+    let mut control = Simulation::load(&checkpoint).unwrap();
+    let mut document: Value = serde_json::from_slice(&checkpoint).unwrap();
+    assert_eq!(document["payload"]["demand"]["generated"], json!(1));
+    document["payload"]["demand"]["generated"] = json!(2);
+
+    let error = Simulation::load(&with_updated_checksum(document)).unwrap_err();
+    assert_eq!(
+        error,
+        LoadError::InvalidState {
+            field: "demand.balance"
+        }
+    );
+    assert_eq!(running.save().unwrap(), checkpoint);
+    let report = running.advance(1).unwrap();
+    assert_eq!(report.executed_ticks, 1);
+    assert_eq!(report, control.advance(1).unwrap());
+    assert_eq!(
+        running.fingerprint().unwrap(),
+        control.fingerprint().unwrap()
+    );
 }
 
 #[test]

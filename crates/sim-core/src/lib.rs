@@ -5,6 +5,7 @@ mod edit;
 mod ids;
 mod junction;
 mod layout;
+mod marker;
 mod network;
 mod observe;
 mod routing;
@@ -17,7 +18,7 @@ mod walking;
 mod world;
 
 pub use ids::{BuildingId, Tick};
-pub use observe::{ClockObservation, Observation, Query, QueryError};
+pub use observe::{ClockObservation, Observation, Query, QueryError, UndoObservation};
 pub use save::{LoadError, SaveError};
 pub use simulation::{
     AdvanceError, AdvanceReport, Command, CommandError, CommandReceipt, Simulation,
@@ -51,3 +52,5 @@ pub use taxi::{
 pub use edit::{EditAction, EditCommand, EditError, EditPreview, TurnPocket};
 
 pub use layout::{BuildingSite, Cell, LayoutError, LayoutSpec, StreetSite, Terrain, TileSpec};
+
+pub use marker::{Marker, MarkerAnchor, MarkerId, MarkerObservation};

@@ -933,7 +933,7 @@ impl DemandState {
             if !self.spec.is_default()
                 || road.car_cohorts().next().is_some()
                 || service.passenger_cohorts().next().is_some()
-                || taxi.cohorts().next().is_some()
+                || taxi.requests().next().is_some()
             {
                 return Err(error("demand"));
             }
@@ -1012,15 +1012,18 @@ impl DemandState {
             self.walking.cohorts(),
             &mut active_modes,
         )?;
-        for (id, origin, destination, amount) in taxi.cohorts() {
-            if saved.cohorts.get(&id).is_none_or(|cohort| {
-                cohort.origin != origin
-                    || cohort.destination != Some(destination)
+        for request in taxi.requests() {
+            if saved.cohorts.get(&request.cohort).is_none_or(|cohort| {
+                cohort.origin != request.origin
+                    || cohort.destination != Some(request.destination)
+                    || cohort.created != request.since
                     || cohort.path != Some(JourneyPath::Taxi)
             }) {
                 return Err(error("demand.taxi"));
             }
-            *active_modes.entry((id, JourneyMode::Taxi)).or_default() += u128::from(amount);
+            *active_modes
+                .entry((request.cohort, JourneyMode::Taxi))
+                .or_default() += u128::from(request.count);
         }
         let mut total = u128::from(saved.arrived);
         for (&id, cohort) in &saved.cohorts {

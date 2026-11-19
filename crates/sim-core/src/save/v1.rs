@@ -1,4 +1,5 @@
 use crate::LayoutSpec;
+use crate::Marker;
 use crate::taxi::{TaxiSnapshot, TaxiSpec};
 use std::{collections::BTreeSet, num::NonZeroU64};
 
@@ -121,6 +122,10 @@ pub(super) struct Payload {
     service: Option<ServiceSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     taxi: Option<TaxiSnapshot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    markers: Vec<Marker>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    undo: Option<Box<Payload>>,
 }
 
 impl Payload {
@@ -139,10 +144,37 @@ impl Payload {
             demand: sim.world.demand.snapshot(),
             service: sim.world.service.snapshot(),
             taxi: sim.world.taxi.snapshot(),
+            markers: sim.markers.values().cloned().collect(),
+            undo: sim
+                .undo
+                .as_ref()
+                .map(|before| Box::new(Payload::from_simulation(before))),
         }
     }
 
     pub(super) fn into_simulation(self) -> Result<Simulation, LoadError> {
+        let undo = self
+            .undo
+            .map(|before| {
+                let invalid = || LoadError::InvalidState { field: "undo" };
+                if before.undo.is_some()
+                    || before.tick > self.tick
+                    || before.development_ticks > self.development_ticks
+                    || before.sequence >= self.sequence
+                    || before.network_revision.checked_add(1) != Some(self.network_revision)
+                    || before.scenario.start != self.scenario.start
+                    || before.scenario.seed != self.scenario.seed
+                    || before.scenario.development_period_ticks
+                        != self.scenario.development_period_ticks
+                {
+                    return Err(invalid());
+                }
+                before
+                    .into_simulation()
+                    .map(Box::new)
+                    .map_err(|_| invalid())
+            })
+            .transpose()?;
         let empty = BTreeSet::new();
         let allowed = self
             .service
@@ -181,6 +213,14 @@ impl Payload {
         sim.sequence = self.sequence;
         sim.paused = self.paused;
         sim.growth_paused = self.growth_paused;
+        for marker in self.markers {
+            if sim.markers.insert(marker.id, marker).is_some() {
+                return Err(LoadError::InvalidState {
+                    field: "markers.id",
+                });
+            }
+        }
+        sim.undo = undo;
         Ok(sim)
     }
 }

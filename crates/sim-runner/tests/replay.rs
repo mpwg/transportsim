@@ -203,6 +203,149 @@ fn replay_persists_capacity_edit_and_rejects_stale_revision_after_load() {
 }
 
 #[test]
+fn restart_undoes_bridge_edit_before_replaying_the_bus_departure() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = dir.path().join("before.json");
+    let after = dir.path().join("after.json");
+    let restored = dir.path().join("restored.json");
+    let edit = dir.path().join("edit.json");
+    let undo = dir.path().join("undo.json");
+    let full_trace = dir.path().join("full.jsonl");
+    let resumed_trace = dir.path().join("resumed.jsonl");
+
+    let original = summary(run(&[
+        ("--scenario", bridge().as_os_str()),
+        ("--until-tick", OsStr::new("10")),
+        ("--save", before.as_os_str()),
+    ]));
+    let uninterrupted = summary(run(&[
+        ("--load", before.as_os_str()),
+        ("--until-tick", OsStr::new("13")),
+        ("--trace", full_trace.as_os_str()),
+    ]));
+
+    fs::write(
+        &edit,
+        r#"[{"tick":10,"command":{"commit_edit":{
+            "expected_revision":0,"actions":[{"set_capacity":{"lane":1,"capacity_mm":120000}}]
+        }}}]"#,
+    )
+    .unwrap();
+    let edited = summary(run(&[
+        ("--load", before.as_os_str()),
+        ("--until-tick", OsStr::new("12")),
+        ("--commands", edit.as_os_str()),
+        ("--save", after.as_os_str()),
+    ]));
+    assert_eq!(edited["tick"], 12);
+    assert_eq!(edited["lanes"][0]["capacity_mm"], 120_000);
+
+    fs::write(&undo, r#"[{"tick":12,"command":"undo_edit"}]"#).unwrap();
+    assert_eq!(
+        summary(run(&[
+            ("--load", after.as_os_str()),
+            ("--commands", undo.as_os_str()),
+            ("--save", restored.as_os_str()),
+        ])),
+        original
+    );
+    assert_eq!(
+        summary(run(&[
+            ("--load", restored.as_os_str()),
+            ("--until-tick", OsStr::new("13")),
+        ])),
+        uninterrupted
+    );
+    assert_eq!(
+        summary(run(&[
+            ("--load", after.as_os_str()),
+            ("--commands", undo.as_os_str()),
+            ("--until-tick", OsStr::new("13")),
+            ("--trace", resumed_trace.as_os_str()),
+        ])),
+        uninterrupted
+    );
+    assert_eq!(trace(&resumed_trace), trace(&full_trace));
+    assert_eq!(uninterrupted["lanes"][0]["departure"]["to"], 3);
+    assert_eq!(
+        uninterrupted["lanes"][0]["departure"]["entry"]["vehicle"]["id"],
+        12
+    );
+}
+
+#[test]
+fn replay_applies_following_commands_at_their_ticks_after_undo() {
+    let dir = tempfile::tempdir().unwrap();
+    let commands = dir.path().join("commands.json");
+    fs::write(
+        &commands,
+        r#"[
+            {"tick":10,"command":{"commit_edit":{
+                "expected_revision":0,"actions":[{"set_capacity":{"lane":1,"capacity_mm":120000}}]
+            }}},
+            {"tick":12,"command":"undo_edit"},
+            {"tick":11,"command":{"set_growth_paused":true}}
+        ]"#,
+    )
+    .unwrap();
+
+    let result = summary(run(&[
+        ("--scenario", bridge().as_os_str()),
+        ("--commands", commands.as_os_str()),
+        ("--until-tick", OsStr::new("13")),
+    ]));
+    assert_eq!(result["tick"], 13);
+    assert_eq!(result["clock"]["development_ticks"], 11);
+    assert_eq!(result["clock"]["growth_paused"], true);
+}
+
+#[test]
+fn replay_sets_and_removes_a_persistent_marker() {
+    use sim_core::{Cell, LaneId, Marker, MarkerAnchor, MarkerId, Observation, Query, Simulation};
+
+    let dir = tempfile::tempdir().unwrap();
+    let commands = dir.path().join("commands.json");
+    let marked = dir.path().join("marked.json");
+    let unmarked = dir.path().join("unmarked.json");
+    fs::write(
+        &commands,
+        r#"[{"tick":0,"command":{"set_marker":{"id":6,"cell":{"x":1,"y":2},"anchor":{"lane":3}}}}]"#,
+    )
+    .unwrap();
+    summary(run(&[
+        ("--scenario", bridge().as_os_str()),
+        ("--commands", commands.as_os_str()),
+        ("--save", marked.as_os_str()),
+    ]));
+    let sim = Simulation::load(&fs::read(&marked).unwrap()).unwrap();
+    let Observation::Markers(markers) = sim.inspect(Query::Markers).unwrap() else {
+        panic!("expected a marker observation");
+    };
+    assert_eq!(markers.len(), 1);
+    assert_eq!(
+        markers[0].marker,
+        Marker {
+            id: MarkerId::new(6),
+            cell: Cell { x: 1, y: 2 },
+            anchor: Some(MarkerAnchor::Lane(LaneId::new(3))),
+        }
+    );
+    assert!(markers[0].anchor_present);
+
+    fs::write(&commands, r#"[{"tick":0,"command":{"remove_marker":6}}]"#).unwrap();
+    summary(run(&[
+        ("--load", marked.as_os_str()),
+        ("--commands", commands.as_os_str()),
+        ("--save", unmarked.as_os_str()),
+    ]));
+    let sim = Simulation::load(&fs::read(&unmarked).unwrap()).unwrap();
+    assert_eq!(
+        sim.inspect(Query::Markers).unwrap(),
+        Observation::Markers(Vec::new())
+    );
+}
+
+#[test]
 fn replay_rejects_invalid_boundaries_without_creating_a_save() {
     let dir = tempfile::tempdir().unwrap();
     let commands = dir.path().join("commands.json");
