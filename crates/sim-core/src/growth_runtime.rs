@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::random::RandomState;
 use crate::{
     BuildingSite, GrowthError, GrowthSite, GrowthUse, Scenario, Simulation, Terrain, edit,
     growth::{Growth, GrowthAssessment},
@@ -242,8 +243,10 @@ impl Simulation {
                 )
             })
             .collect();
-        self.world
-            .growth
-            .choose(self.world.demand.totals(), &assessments);
+        self.world.growth.choose(
+            self.world.demand.totals(),
+            &assessments,
+            self.random.as_mut().map(RandomState::growth),
+        );
     }
 }

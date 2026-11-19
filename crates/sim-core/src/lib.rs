@@ -10,6 +10,7 @@ mod layout;
 mod marker;
 mod network;
 mod observe;
+mod random;
 mod routing;
 mod save;
 mod service;
@@ -32,7 +33,9 @@ pub use network::{
     DischargeRate, JunctionId, LaneId, LaneSpec, MovementId, MovementSpec, RoadValidationError,
     VehicleId, VehicleKind,
 };
-pub use traffic::{LaneDeparture, LaneObservation, QueueEntry, TrafficSeed, WaitReason};
+pub use traffic::{
+    LaneDeparture, LaneObservation, QueueEntry, RoadVehicleProgress, TrafficSeed, WaitReason,
+};
 
 pub use demand::{
     ActiveJourney, DemandError, DemandObservation, DemandProfile, DemandSpec, TripPurpose, ZoneId,

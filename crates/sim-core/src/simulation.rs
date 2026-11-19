@@ -1,4 +1,5 @@
 use crate::LineId;
+use crate::random::RandomState;
 use crate::world::World;
 use crate::{
     ClockObservation, Observation, Query, QueryError, RuleSet, Scenario, Tick, ValidationError,
@@ -97,6 +98,7 @@ pub struct Simulation {
     pub(crate) growth_paused: bool,
     pub(crate) scenario: Scenario,
     pub(crate) seed: u64,
+    pub(crate) random: Option<RandomState>,
     pub(crate) undo: Option<Box<Simulation>>,
     pub(crate) markers: BTreeMap<MarkerId, Marker>,
 }
@@ -124,6 +126,7 @@ impl Simulation {
             world,
             scenario,
             seed,
+            random: Some(RandomState::seeded(seed)),
             rules,
             traffic,
             development_ticks: 0,
@@ -205,6 +208,7 @@ impl Simulation {
             undo: None,
             markers: self.markers.clone(),
             seed: self.seed,
+            random: self.random,
             rules: self.rules,
             traffic: self.traffic,
             development_ticks: self.development_ticks,
@@ -243,6 +247,7 @@ impl Simulation {
             .checked_add(growth_ticks)
             .ok_or(AdvanceError::DevelopmentClockOverflow)?;
         let growing = !self.growth_paused && !self.scenario.growth.sites.is_empty();
+        let work_phase = self.random.map_or(0, RandomState::demand_phase);
         self.world.demand.sample_growth(growing);
         for offset in 0..ticks {
             let tick = Tick::new(start.seconds() + offset + 1);
@@ -251,6 +256,7 @@ impl Simulation {
                 &mut self.world.road,
                 &mut self.world.service,
                 &mut self.world.taxi,
+                work_phase,
             );
             let taxi_arrivals = self.world.taxi.tick(tick, &mut self.world.road);
             self.world.demand.taxi_arrivals(taxi_arrivals, tick);

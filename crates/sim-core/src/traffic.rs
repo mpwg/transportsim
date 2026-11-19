@@ -99,9 +99,22 @@ pub struct LaneObservation {
     pub tick: Tick,
     pub capacity_mm: u32,
     pub occupied_mm: u32,
+    /// Space occupied by consecutive ready entries at the front of the lane.
+    pub ready_queue_mm: u32,
     pub queue: Vec<QueueEntry>,
+    pub vehicles: Vec<RoadVehicleProgress>,
     pub wait_reason: Option<WaitReason>,
     pub departure: Option<LaneDeparture>,
+}
+
+/// The estimated progress of one deployed vehicle along its current lane.
+#[derive(Debug, Eq, PartialEq, serde::Serialize)]
+#[non_exhaustive]
+pub struct RoadVehicleProgress {
+    pub id: VehicleId,
+    pub travel_ticks: u32,
+    /// Zero means the vehicle has finished the current lane's free travel time.
+    pub remaining_travel_ticks: u32,
 }
 
 #[derive(Debug)]
@@ -828,11 +841,33 @@ impl RoadState {
 
     pub(crate) fn observe(&self, id: LaneId, tick: Tick) -> Option<LaneObservation> {
         let lane = self.lanes.get(&id)?;
+        let travel_ticks = lane.spec.travel_ticks.get();
         Some(LaneObservation {
             tick,
             capacity_mm: lane.spec.capacity_mm.get(),
             occupied_mm: lane.occupied_mm,
+            ready_queue_mm: lane
+                .queue
+                .iter()
+                .take_while(|item| item.ready_at.is_some_and(|ready| ready <= tick))
+                .map(|item| item.entry.units() * item.entry.unit_space())
+                .sum(),
             queue: lane.queue.iter().map(|item| item.entry.clone()).collect(),
+            vehicles: lane
+                .queue
+                .iter()
+                .filter_map(|item| {
+                    let id = item.entry.vehicle_id()?;
+                    let remaining = item.ready_at.map_or(u64::from(travel_ticks), |ready| {
+                        ready.seconds().saturating_sub(tick.seconds())
+                    });
+                    Some(RoadVehicleProgress {
+                        id,
+                        travel_ticks,
+                        remaining_travel_ticks: remaining.min(u64::from(travel_ticks)) as u32,
+                    })
+                })
+                .collect(),
             wait_reason: lane.wait,
             departure: lane.departure.clone(),
         })

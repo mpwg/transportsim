@@ -22,6 +22,7 @@ fn site() -> GrowthSite {
         amount: nz(2),
         max_tiers: nz(1),
         initial_tiers: 0,
+        additional_build_periods: 0,
         local_road: None,
     }
 }
@@ -319,4 +320,43 @@ fn local_road_is_reserved_then_built_and_the_building_can_be_densified() {
             .count(),
         1
     );
+}
+
+#[test]
+fn seeded_construction_periods_continue_after_reload_and_stop_during_pause() {
+    let mut spec = scenario();
+    let mut site = serde_json::to_value(&spec.growth.sites[0]).unwrap();
+    site["additional_build_periods"] = serde_json::json!(7);
+    site["max_tiers"] = serde_json::json!(2);
+    spec.growth.sites[0] = serde_json::from_value(site).unwrap();
+
+    let mut sim = Simulation::new_game(spec, rules(), 42).unwrap();
+    let random = |sim: &Simulation| {
+        let save: serde_json::Value = serde_json::from_slice(&sim.save().unwrap()).unwrap();
+        save["payload"]["random"].clone()
+    };
+    let initial_random = random(&sim);
+    sim.advance(2).unwrap();
+    assert!(growth(&sim).projects.is_empty());
+    assert_eq!(random(&sim), initial_random);
+
+    add_line(&mut sim);
+    sim.apply(Command::SetGrowthPaused(true)).unwrap();
+    sim.advance(4).unwrap();
+    assert!(growth(&sim).projects.is_empty());
+    assert_eq!(random(&sim), initial_random);
+
+    sim.apply(Command::SetGrowthPaused(false)).unwrap();
+    sim.advance(2).unwrap();
+    let after_approval = random(&sim);
+    assert_eq!(growth(&sim).projects[0].remaining_periods, 8);
+    assert_eq!(after_approval["demand"], initial_random["demand"]);
+    assert_ne!(after_approval["growth"], initial_random["growth"]);
+
+    let mut resumed = Simulation::load(&sim.save().unwrap()).unwrap();
+    sim.advance(16).unwrap();
+    resumed.advance(16).unwrap();
+    assert_eq!(growth(&resumed).totals.residents, 2);
+    assert_eq!(sim.fingerprint().unwrap(), resumed.fingerprint().unwrap());
+    assert_ne!(random(&sim)["growth"], after_approval["growth"]);
 }

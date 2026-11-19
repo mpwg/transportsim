@@ -74,6 +74,7 @@ fn phase(ticks: u32, moves: &[u64]) -> SignalPhase {
 fn bus_waits_behind_left_turners_and_crosses_as_one_vehicle() {
     let mut spec = Scenario::empty(Tick::new(0));
     spec.lanes = vec![lane(1, 60_000), lane(2, 60_000), lane(3, 60_000)];
+    spec.lanes[2].travel_ticks = nz(4);
     spec.movements = vec![movement(1, 1, 2), movement(2, 1, 3)];
     spec.junctions = vec![JunctionSpec {
         id: JunctionId::new(1),
@@ -89,11 +90,20 @@ fn bus_waits_behind_left_turners_and_crosses_as_one_vehicle() {
     sim.advance(1).unwrap();
     assert_eq!(observe(&sim, 1).queue, [cars(3), bus(), cars(5)]);
     assert_eq!(observe(&sim, 1).wait_reason, Some(WaitReason::RedSignal));
+    assert_eq!(observe(&sim, 1).ready_queue_mm, 52_000);
     assert!(observe(&sim, 3).queue.is_empty());
     sim.advance(2).unwrap();
-    assert_eq!(observe(&sim, 3).queue, [bus()]);
-    assert_eq!(observe(&sim, 3).occupied_mm, 12_000);
+    let receiving = observe(&sim, 3);
+    assert_eq!(receiving.queue, [bus()]);
+    assert_eq!(receiving.occupied_mm, 12_000);
+    assert_eq!(receiving.ready_queue_mm, 0);
+    assert_eq!(receiving.vehicles[0].id, VehicleId::new(12));
+    assert_eq!(receiving.vehicles[0].travel_ticks, 4);
+    assert_eq!(receiving.vehicles[0].remaining_travel_ticks, 4);
     assert_eq!(observe(&sim, 1).queue, [cars(5)]);
+    let mut resumed = Simulation::load(&sim.save().unwrap()).unwrap();
+    resumed.advance(2).unwrap();
+    assert_eq!(observe(&resumed, 3).vehicles[0].remaining_travel_ticks, 2);
 }
 
 #[test]

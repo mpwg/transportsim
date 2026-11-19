@@ -1,3 +1,4 @@
+use crate::random::SplitMix64;
 use crate::{BuildingId, Cell, JunctionId, LaneId, LoadError, MovementId};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -134,6 +135,15 @@ impl Growth {
             if site.initial_tiers > site.max_tiers.get() {
                 return Err(GrowthError::InvalidInitialTiers(id));
             }
+            if spec
+                .rules
+                .build_periods
+                .get()
+                .checked_add(site.additional_build_periods)
+                .is_none()
+            {
+                return Err(GrowthError::BuildDurationOverflow(id));
+            }
             if site.local_road.as_ref().is_some_and(|road| {
                 road.lane.id != road.street.lane
                     || site.access != Some(road.lane.id)
@@ -206,6 +216,7 @@ impl Growth {
         &mut self,
         totals: GrowthTotals,
         assessments: &BTreeMap<BuildingId, GrowthAssessment>,
+        mut random: Option<&mut SplitMix64>,
     ) {
         let mut capacity = totals.unclaimed_capacity();
         let mut reserved = BTreeSet::new();
@@ -249,13 +260,16 @@ impl Growth {
                 GrowthReason::Eligible
             } else {
                 let amount = (*unclaimed).min(site.amount.get());
+                let extra_periods = random.as_deref_mut().map_or(0, |stream| {
+                    stream.sample_up_to(site.additional_build_periods)
+                });
                 self.projects.insert(
                     id,
                     GrowthProject {
                         building: id,
                         usage: site.usage,
                         amount,
-                        remaining_periods: self.rules.build_periods.get(),
+                        remaining_periods: self.rules.build_periods.get() + extra_periods,
                     },
                 );
                 *unclaimed -= amount;
@@ -329,7 +343,8 @@ impl Growth {
             if site.usage != project.usage
                 || project.amount == 0
                 || project.amount > site.amount.get().min(*unclaimed)
-                || project.remaining_periods > self.rules.build_periods.get()
+                || project.remaining_periods
+                    > self.rules.build_periods.get() + site.additional_build_periods
                 || state.reason != GrowthReason::Reserved
                 || site
                     .assets(state.tiers)

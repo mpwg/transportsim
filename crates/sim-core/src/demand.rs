@@ -569,6 +569,7 @@ impl DemandState {
         road: &mut RoadState,
         service: &mut Service,
         taxi: &mut Taxi,
+        work_phase: u64,
     ) {
         if self.zones.is_empty() {
             return;
@@ -590,7 +591,7 @@ impl DemandState {
         }
         let day = elapsed / DAY_TICKS;
         if self.state.day != Some(day) {
-            self.open_day(day, tick, planning);
+            self.open_day(day, tick, planning, work_phase);
         }
         for cohort in self.state.scheduled.remove(&tick).into_iter().flatten() {
             self.create(cohort, planning);
@@ -674,7 +675,7 @@ impl DemandState {
         }
     }
 
-    fn open_day(&mut self, day: u64, tick: Tick, planning: Planning<'_>) {
+    fn open_day(&mut self, day: u64, tick: Tick, planning: Planning<'_>, work_phase: u64) {
         self.state.day = Some(day);
         self.state.jobs_used.clear();
         let first_offset = ((tick.seconds() - 1) % DAY_TICKS) as u32;
@@ -691,12 +692,19 @@ impl DemandState {
                 break;
             };
             for index in profiles {
-                self.plan_window(index, day, departure, planning);
+                self.plan_window(index, day, departure, planning, work_phase);
             }
         }
     }
 
-    fn plan_window(&mut self, index: usize, day: u64, tick: Tick, planning: Planning<'_>) {
+    fn plan_window(
+        &mut self,
+        index: usize,
+        day: u64,
+        tick: Tick,
+        planning: Planning<'_>,
+        work_phase: u64,
+    ) {
         let profile = &self.spec.profiles[index];
         let purpose = profile.purpose;
         let numerator = u64::from(profile.rate_numerator);
@@ -709,7 +717,12 @@ impl DemandState {
             .map(|zone| (zone.id, zone.residents))
             .collect();
         if !homes.is_empty() {
-            let shift = (day % homes.len() as u64) as usize;
+            let phase = if purpose == TripPurpose::Work {
+                work_phase
+            } else {
+                0
+            };
+            let shift = ((u128::from(day) + u128::from(phase)) % homes.len() as u128) as usize;
             homes.rotate_left(shift);
         }
         for (home, residents) in homes {

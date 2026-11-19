@@ -44,7 +44,8 @@ struct RunArgs {
     /// Write the final checkpoint to this file.
     #[arg(long, value_name = "PATH")]
     save: Option<PathBuf>,
-    /// Write one JSON line per completed tick, before commands at that boundary.
+    /// Write a JSON line per completed tick with traffic, demand, service, taxi and growth
+    /// measurements, before commands at that boundary.
     #[arg(long, value_name = "PATH")]
     trace: Option<PathBuf>,
 }

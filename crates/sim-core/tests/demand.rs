@@ -291,8 +291,7 @@ fn a_signalized_foot_crossing_stays_blocked_until_green_across_reload() {
     assert_eq!(demand(&restored).total_travel_ticks, 12);
 }
 
-#[test]
-fn residential_zones_alternate_when_the_only_work_zone_has_one_space() {
+fn contested_work_scenario() -> Scenario {
     let start = Tick::new(86_398);
     let mut scenario = commute(1, 1, 1, 1);
     scenario.start = start;
@@ -310,7 +309,12 @@ fn residential_zones_alternate_when_the_only_work_zone_has_one_space() {
     connection.from = ZoneId::new(3);
     connection.travel_ticks = nz(86_401);
     scenario.demand.foot_edges.push(connection);
-    let mut sim = Simulation::new_game(scenario, RuleSet::default(), 42).unwrap();
+    scenario
+}
+
+#[test]
+fn residential_zones_alternate_when_the_only_work_zone_has_one_space() {
+    let mut sim = Simulation::new_game(contested_work_scenario(), RuleSet::default(), 42).unwrap();
     sim.advance(1).unwrap();
     assert!(
         demand(&sim).active.iter().any(
@@ -323,4 +327,18 @@ fn residential_zones_alternate_when_the_only_work_zone_has_one_space() {
             |batch| batch.origin == ZoneId::new(3) && batch.destination == Some(ZoneId::new(2))
         )
     );
+}
+
+#[test]
+fn seed_selects_the_initial_phase_of_work_rotation() {
+    let mut sim = Simulation::new_game(contested_work_scenario(), RuleSet::default(), 1).unwrap();
+    sim.advance(1).unwrap();
+    assert!(demand(&sim).active.iter().any(|batch| {
+        batch.origin == ZoneId::new(3) && batch.destination == Some(ZoneId::new(2))
+    }));
+    let mut resumed = Simulation::load(&sim.save().unwrap()).unwrap();
+    resumed.advance(86_400).unwrap();
+    assert!(demand(&resumed).active.iter().any(|batch| {
+        batch.origin == ZoneId::new(1) && batch.destination == Some(ZoneId::new(2))
+    }));
 }

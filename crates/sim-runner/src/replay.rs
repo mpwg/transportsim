@@ -1,11 +1,15 @@
+mod observations;
+
 use std::io::Write;
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sim_core::{
     ClockObservation, Command, EditCommand, Marker, MarkerId, Observation, Query, QueueEntry,
-    Simulation, VehicleKind, WaitReason,
+    RoadVehicleProgress, Simulation, VehicleKind, WaitReason,
 };
+
+use observations::Measurements;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -175,6 +179,8 @@ pub(crate) struct Snapshot {
     tick: u64,
     clock: Clock,
     lanes: Vec<Lane>,
+    #[serde(flatten)]
+    measurements: Measurements,
 }
 
 impl Snapshot {
@@ -189,7 +195,9 @@ impl Snapshot {
                 id: id.get(),
                 capacity_mm: lane.capacity_mm,
                 occupied_mm: lane.occupied_mm,
+                ready_queue_mm: lane.ready_queue_mm,
                 queue: lane.queue.into_iter().map(Entry::from).collect(),
+                vehicles: lane.vehicles,
                 wait_reason: lane.wait_reason.map(wait_reason),
                 departure: lane.departure.map(|departure| Departure {
                     entry: departure.entry.into(),
@@ -206,6 +214,7 @@ impl Snapshot {
                 growth_paused: clock.growth_paused,
             },
             lanes,
+            measurements: Measurements::inspect(sim)?,
         })
     }
 }
@@ -223,7 +232,9 @@ struct Lane {
     id: u64,
     capacity_mm: u32,
     occupied_mm: u32,
+    ready_queue_mm: u32,
     queue: Vec<Entry>,
+    vehicles: Vec<RoadVehicleProgress>,
     wait_reason: Option<&'static str>,
     departure: Option<Departure>,
 }

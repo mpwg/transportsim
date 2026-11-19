@@ -74,7 +74,14 @@ pub struct GrowthSite {
     /// Tiers already completed in the starting scenario.
     #[serde(default)]
     pub initial_tiers: u32,
+    /// Maximum extra development periods drawn when a project is approved.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub additional_build_periods: u32,
     pub local_road: Option<LocalRoad>,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 /// The optional street built when a parcel is developed for the first time.
@@ -95,6 +102,7 @@ pub struct LocalRoad {
 pub enum GrowthError {
     DuplicateSite(BuildingId),
     InvalidInitialTiers(BuildingId),
+    BuildDurationOverflow(BuildingId),
     InvalidLocalRoad(BuildingId),
     InvalidSite(BuildingId),
     PopulationLimit,
@@ -111,6 +119,13 @@ impl fmt::Display for GrowthError {
                 "growth site for building {} exceeds its tier limit",
                 id.get()
             ),
+            Self::BuildDurationOverflow(id) => {
+                write!(
+                    out,
+                    "construction duration overflows at growth site {}",
+                    id.get()
+                )
+            }
             Self::InvalidLocalRoad(id) => {
                 write!(out, "invalid local road for growth site {}", id.get())
             }

@@ -499,6 +499,8 @@ fn serviced_meadow_builds_after_three_development_periods_and_pause_preserves_pr
     let mut city: Value =
         serde_json::from_slice(&fs::read(scenario("bridge-city.json")).unwrap()).unwrap();
     city["development_period_ticks"] = json!(240);
+    // Force a new wave of arrivals while the development measurements are paused.
+    city["demand"]["profiles"][1]["departure_offsets"] = json!([480, 18000, 45000]);
     fs::write(&fast_city, serde_json::to_vec(&city).unwrap()).unwrap();
     run(runner()
         .arg("--scenario")
@@ -532,6 +534,22 @@ fn serviced_meadow_builds_after_three_development_periods_and_pause_preserves_pr
     assert_eq!(clock["clock"]["development_ticks"], 240);
     let mut resumed = load(&paused);
     assert_eq!(growth(&resumed), at_approval);
+    assert!(demand(&resumed).arrived > demand(&developing).arrived);
+    let read_payload = |path| -> Value {
+        let file: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        file["payload"]["demand"].clone()
+    };
+    let before_measurements = read_payload(&start);
+    let after_measurements = read_payload(&paused);
+    assert_ne!(
+        before_measurements["measurements"],
+        after_measurements["measurements"]
+    );
+    assert!(!before_measurements["growth_measurements"].is_null());
+    assert_eq!(
+        before_measurements["growth_measurements"],
+        after_measurements["growth_measurements"]
+    );
     let Observation::Service(service) = resumed.inspect(Query::Service).unwrap() else {
         panic!("expected a service observation");
     };

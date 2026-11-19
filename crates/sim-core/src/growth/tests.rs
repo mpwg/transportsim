@@ -15,6 +15,7 @@ fn site(id: u64, usage: GrowthUse) -> GrowthSite {
         amount: TWO,
         max_tiers: TWO,
         initial_tiers: 0,
+        additional_build_periods: 0,
         local_road: None,
     }
 }
@@ -57,7 +58,11 @@ fn ranks_accessibility_then_building_id() {
         site(5, GrowthUse::Housing),
     ]))
     .unwrap();
-    growth.choose(totals, &assess(&[(1, 2), (2, 7), (3, 7), (4, 8), (5, 1)]));
+    growth.choose(
+        totals,
+        &assess(&[(1, 2), (2, 7), (3, 7), (4, 8), (5, 1)]),
+        None,
+    );
     let observation = growth.observe(totals);
     let chosen: Vec<_> = observation
         .projects
@@ -81,14 +86,14 @@ fn reserves_population_during_construction() {
     ]))
     .unwrap();
     let assessments = assess(&[(1, 7), (2, 2)]);
-    growth.choose(totals, &assessments);
+    growth.choose(totals, &assessments, None);
     assert_eq!(growth.project(BuildingId::new(1)).unwrap().amount, 1);
     assert_eq!(
         growth.observe(totals).sites[1].reason,
         GrowthReason::NoCapacity
     );
     assert!(growth.due().is_empty());
-    growth.choose(totals, &assessments);
+    growth.choose(totals, &assessments, None);
     assert!(growth.project(BuildingId::new(2)).is_none());
 }
 
@@ -106,7 +111,7 @@ fn running_job_and_shop_projects_reserve_their_own_demand() {
         site(4, GrowthUse::Shops),
     ]))
     .unwrap();
-    growth.choose(totals, &assess(&[(1, 5), (2, 4), (3, 3), (4, 2)]));
+    growth.choose(totals, &assess(&[(1, 5), (2, 4), (3, 3), (4, 2)]), None);
     let observation = growth.observe(totals);
     let chosen: Vec<_> = observation
         .projects
@@ -124,7 +129,7 @@ fn checkpoint_keeps_construction_time_and_observed_reasons() {
     let spec = spec(vec![site(1, GrowthUse::Housing)]);
     let totals = GrowthTotals::default();
     let mut growth = Growth::new(spec.clone()).unwrap();
-    growth.choose(totals, &assess(&[(1, 7)]));
+    growth.choose(totals, &assess(&[(1, 7)]), None);
     assert!(growth.complete(id).is_none());
     assert!(growth.due().is_empty());
     let wire = serde_json::to_vec(&growth.snapshot()).unwrap();
@@ -149,7 +154,7 @@ fn checkpoint_rejects_invalid_project_values_without_mutating_state() {
     };
     let spec = spec(vec![site(1, GrowthUse::Housing)]);
     let mut growth = Growth::new(spec).unwrap();
-    growth.choose(totals, &assess(&[(1, 7)]));
+    growth.choose(totals, &assess(&[(1, 7)]), None);
     let before = growth.observe(totals);
     for (key, value) in [
         ("building", serde_json::json!(2)),
@@ -207,7 +212,7 @@ fn reserves_local_road_cells_against_other_building_projects() {
     first.local_road = Some(road(first.access.unwrap(), vec![second.cell]));
     let totals = GrowthTotals::default();
     let mut growth = Growth::new(spec(vec![first, second])).unwrap();
-    growth.choose(totals, &assess(&[(1, 7), (2, 2)]));
+    growth.choose(totals, &assess(&[(1, 7), (2, 2)]), None);
     assert_eq!(
         growth.observe(totals).sites[1].reason,
         GrowthReason::SpaceReserved
@@ -224,7 +229,7 @@ fn checkpoint_restores_a_road_reservation_visiting_one_cell_twice() {
     let spec = spec(vec![first]);
     let totals = GrowthTotals::default();
     let mut growth = Growth::new(spec.clone()).unwrap();
-    growth.choose(totals, &assess(&[(1, 7)]));
+    growth.choose(totals, &assess(&[(1, 7)]), None);
     let mut resumed = Growth::new(spec).unwrap();
     resumed.restore(growth.snapshot(), totals).unwrap();
     assert_eq!(resumed.observe(totals), growth.observe(totals));

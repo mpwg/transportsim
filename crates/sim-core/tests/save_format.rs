@@ -384,3 +384,36 @@ fn newer_format_reports_its_version_before_using_the_v1_schema() {
         Err(LoadError::UnsupportedFormat { version: 2 })
     ));
 }
+
+#[test]
+fn legacy_checkpoint_keeps_its_fingerprint_without_random_streams() {
+    let mut legacy = document();
+    let current = legacy["payload"]
+        .as_object_mut()
+        .unwrap()
+        .remove("random")
+        .unwrap();
+    assert_eq!(current["version"], json!("splitmix64_v1"));
+    let bytes = with_updated_checksum(legacy);
+    let expected: Value = serde_json::from_slice(&bytes).unwrap();
+    let mut resumed = Simulation::load(&bytes).unwrap();
+    assert_eq!(
+        blake3::Hash::from_bytes(resumed.fingerprint().unwrap())
+            .to_hex()
+            .as_str(),
+        expected["checksum"].as_str().unwrap()
+    );
+    resumed.advance(1).unwrap();
+    let saved: Value = serde_json::from_slice(&resumed.save().unwrap()).unwrap();
+    assert!(saved["payload"].get("random").is_none());
+}
+
+#[test]
+fn unsupported_random_stream_version_is_rejected_after_checksum_verification() {
+    let mut invalid = document();
+    invalid["payload"]["random"]["version"] = json!("splitmix64_v2");
+    assert!(matches!(
+        Simulation::load(&with_updated_checksum(invalid)),
+        Err(LoadError::Json { .. })
+    ));
+}

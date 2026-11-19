@@ -1,5 +1,6 @@
 use crate::LayoutSpec;
 use crate::Marker;
+use crate::random::RandomState;
 use crate::taxi::{TaxiSnapshot, TaxiSpec};
 use crate::{GrowthSpec, growth::GrowthSnapshot, growth_runtime};
 use std::{collections::BTreeSet, num::NonZeroU64};
@@ -121,6 +122,8 @@ pub(super) struct Payload {
     sequence: u64,
     paused: bool,
     growth_paused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    random: Option<RandomState>,
     lanes: Vec<LaneV1>,
     junctions: Vec<JunctionV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -148,6 +151,7 @@ impl Payload {
             sequence: sim.sequence,
             paused: sim.paused,
             growth_paused: sim.growth_paused,
+            random: sim.random,
             lanes,
             junctions,
             demand: sim.world.demand.snapshot(),
@@ -174,6 +178,7 @@ impl Payload {
                     || before.network_revision >= self.network_revision
                     || before.scenario.start != self.scenario.start
                     || before.scenario.seed != self.scenario.seed
+                    || before.random.is_some() != self.random.is_some()
                     || before.scenario.development_period_ticks
                         != self.scenario.development_period_ticks
                 {
@@ -233,6 +238,7 @@ impl Payload {
         sim.sequence = self.sequence;
         sim.paused = self.paused;
         sim.growth_paused = self.growth_paused;
+        sim.random = self.random;
         for marker in self.markers {
             if sim.markers.insert(marker.id, marker).is_some() {
                 return Err(LoadError::InvalidState {
