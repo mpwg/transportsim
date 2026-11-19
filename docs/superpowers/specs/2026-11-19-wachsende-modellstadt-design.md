@@ -4,6 +4,13 @@
 
 Du gestaltest die Wege einer Stadt, die von selbst wächst. Heute hilfst du einem Bus über eine verstopfte Kreuzung. Jahre später erkennst du dieselbe Ecke am Wirtshaus wieder. Inzwischen steigen dort jeden Morgen Dutzende Menschen in deine Straßenbahn. Wie ein Ort sich durch deine Entscheidungen verändert hat, kannst du ihm ansehen.
 
+## Die Stadt in vier Ansichten
+
+1. [Die Kreuzung am Brückenkopf](../../konzeptbilder/strassenbahn-am-brueckenkopf.png) zeigt Bus, Straßenbahn und Abbiegespuren aus der Nähe.
+2. [Die Straßenbahn im Viertel](../../konzeptbilder/stadtviertel-und-strassenbahn.png) führt vom Marktplatz über die Brücke bis ins Wohnviertel.
+3. [Die Gesamtstadt mit Autobahnanschluss](../../konzeptbilder/gesamtstadt-mit-autobahnanschluss.png) zeigt die ersten Baustellen an der Endstation.
+4. [Dieselbe Stadt fünf Spieljahre später](../../konzeptbilder/gesamtstadt-fuenf-spieljahre-spaeter.png) zeigt im gleichen Ausschnitt, wie das Viertel rund um die Wendeschleife gewachsen ist.
+
 ## Die gewählte Spielidee
 
 Im Mittelpunkt steht die **wachsende Modellstadt**. Sie lässt dir die Wahl, ob du einen Nachmittag an einer einzigen Ampel tüftelst oder eine Bahnlinie quer durch die Stadt planst. Zwei weitere Ideen prägen das Spiel. Die **Verkehrswerkstatt** liefert die Werkzeuge und die Freude am genauen Beobachten. Die **Verkehrswende** wird dort sichtbar, wo Menschen aufs Auto verzichten können und auf ihren Straßen Platz für anderes entsteht. Du bestimmst selbst, wie weit du diese Veränderung in welchem Viertel treiben möchtest.
