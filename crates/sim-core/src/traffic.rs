@@ -6,7 +6,7 @@ use crate::network::{
 use crate::save::v1::{JunctionV1, LaneV1, QueueItemV1};
 use crate::{LoadError, Tick, ValidationError};
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::num::NonZeroU32;
 
 const CAR_SPACE_MM: u32 = 5_000;
@@ -100,11 +100,13 @@ struct QueueItem {
     entry: QueueEntry,
     ready_at: Option<Tick>,
     route: VecDeque<MovementId>,
+    cohort: Option<u64>,
 }
 
 #[derive(Debug)]
 struct LaneState {
     spec: LaneSpec,
+    outgoing: Vec<MovementId>,
     occupied_mm: u32,
     credit: u64,
     queue: VecDeque<QueueItem>,
@@ -117,6 +119,7 @@ pub(crate) struct RoadState {
     lanes: BTreeMap<LaneId, LaneState>,
     movements: BTreeMap<MovementId, MovementSpec>,
     junctions: BTreeMap<JunctionId, JunctionState>,
+    car_arrivals: Vec<(u64, u32)>,
 }
 
 #[derive(Clone, Copy)]
@@ -135,6 +138,105 @@ struct GrantedMove {
 }
 
 impl RoadState {
+    /// Free-flow cost includes every lane from the source to the destination.
+    pub(crate) fn route(&self, from: LaneId, to: LaneId) -> Option<(u64, Vec<MovementId>)> {
+        let car = QueueEntry::PrivateCars(NonZeroU32::MIN);
+        self.validate_lane(from, &car).ok()?;
+        self.validate_lane(to, &car).ok()?;
+        let initial_cost = u64::from(self.lanes[&from].spec.travel_ticks.get());
+        let mut best = BTreeMap::from([(from, (initial_cost, None))]);
+        let mut pending = BinaryHeap::from([Reverse((initial_cost, from))]);
+
+        // Equal costs are visited in lane ID order. Outgoing movements are sorted
+        // by ID, and an equal candidate retains the first predecessor.
+        while let Some(Reverse((cost, lane))) = pending.pop() {
+            if cost != best[&lane].0 {
+                continue;
+            }
+            if lane == to {
+                let mut current = to;
+                let mut route = Vec::new();
+                while let Some(id) = best[&current].1 {
+                    route.push(id);
+                    current = self.movements[&id].from;
+                }
+                route.reverse();
+                return Some((cost, route));
+            }
+            for &id in &self.lanes[&lane].outgoing {
+                let target = self.movements[&id].to;
+                if self.validate_lane(target, &car).is_err() {
+                    continue;
+                }
+                let travel = u64::from(self.lanes[&target].spec.travel_ticks.get());
+                if let Some(candidate) = cost.checked_add(travel)
+                    && best
+                        .get(&target)
+                        .is_none_or(|&(known, _)| candidate < known)
+                {
+                    best.insert(target, (candidate, Some(id)));
+                    pending.push(Reverse((candidate, target)));
+                }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn enter_cars(
+        &mut self,
+        from: LaneId,
+        route: &[MovementId],
+        count: u32,
+        tick: Tick,
+        cohort: u64,
+    ) -> u32 {
+        let Some(lane) = self.lanes.get(&from) else {
+            return 0;
+        };
+        let free = lane.spec.capacity_mm.get() - lane.occupied_mm;
+        let Some(admitted) = NonZeroU32::new(count.min(free / CAR_SPACE_MM)) else {
+            return 0;
+        };
+        let item = QueueItem {
+            entry: QueueEntry::PrivateCars(admitted),
+            ready_at: tick
+                .seconds()
+                .checked_add(u64::from(lane.spec.travel_ticks.get()))
+                .map(Tick::new),
+            route: route.iter().copied().collect(),
+            cohort: Some(cohort),
+        };
+        self.push_queue_item(from, item)
+            .map_or(0, |()| admitted.get())
+    }
+
+    /// Terminal departures produced by the most recent tick.
+    pub(crate) fn car_arrivals(&self) -> impl Iterator<Item = (u64, u32)> + '_ {
+        self.car_arrivals.iter().copied()
+    }
+
+    /// Each part of a cohort that still occupies a lane.
+    pub(crate) fn car_cohorts(&self) -> impl Iterator<Item = (u64, u32)> + '_ {
+        self.lanes
+            .values()
+            .flat_map(|lane| &lane.queue)
+            .filter_map(|item| Some((item.cohort?, item.entry.units())))
+    }
+
+    pub(crate) fn contains_lane(&self, id: LaneId) -> bool {
+        self.lanes.contains_key(&id)
+    }
+
+    pub(crate) fn contains_movement(&self, id: MovementId) -> bool {
+        self.movements.contains_key(&id)
+    }
+
+    pub(crate) fn signal_allows(&self, id: MovementId, tick: Tick) -> bool {
+        self.movements
+            .get(&id)
+            .is_some_and(|movement| self.junctions[&movement.junction].allows(id, tick))
+    }
+
     pub(crate) fn new(
         lanes: Vec<LaneSpec>,
         movements: Vec<MovementSpec>,
@@ -145,11 +247,13 @@ impl RoadState {
             lanes: BTreeMap::new(),
             movements: BTreeMap::new(),
             junctions: BTreeMap::new(),
+            car_arrivals: Vec::new(),
         };
         for spec in lanes {
             let id = spec.id;
             let state = LaneState {
                 spec,
+                outgoing: Vec::new(),
                 occupied_mm: 0,
                 credit: 0,
                 queue: VecDeque::new(),
@@ -188,6 +292,13 @@ impl RoadState {
             }
         }
         road.validate_signals()?;
+        for (&id, movement) in &road.movements {
+            road.lanes
+                .get_mut(&movement.from)
+                .expect("validated movement source")
+                .outgoing
+                .push(id);
+        }
         let mut ids = BTreeSet::new();
         for seed in seeds {
             if let QueueEntry::Vehicle { id, .. } = seed.entry
@@ -239,6 +350,7 @@ impl RoadState {
                 entry: seed.entry,
                 ready_at: Some(seed.ready_at),
                 route: seed.route.into(),
+                cohort: None,
             },
         )
     }
@@ -308,6 +420,7 @@ impl RoadState {
                         entry: item.entry.clone(),
                         ready_at: item.ready_at,
                         route: item.route.iter().copied().collect(),
+                        cohort: item.cohort,
                     })
                     .collect(),
             })
@@ -341,6 +454,7 @@ impl RoadState {
         if junctions.len() != self.junctions.len() {
             return Err(LoadError::InvalidState { field: "junctions" });
         }
+        self.car_arrivals.clear();
         for lane in self.lanes.values_mut() {
             lane.queue.clear();
             lane.occupied_mm = 0;
@@ -393,10 +507,15 @@ impl RoadState {
                         field: "lanes.queue.ready_at",
                     });
                 }
-                if let QueueEntry::Vehicle { id, .. } = item.entry
-                    && !vehicles.insert(id)
-                {
-                    return Err(road_error(RoadValidationError::DuplicateVehicle(id)));
+                if let QueueEntry::Vehicle { id, .. } = item.entry {
+                    if item.cohort.is_some() {
+                        return Err(LoadError::InvalidState {
+                            field: "lanes.queue.cohort",
+                        });
+                    }
+                    if !vehicles.insert(id) {
+                        return Err(road_error(RoadValidationError::DuplicateVehicle(id)));
+                    }
                 }
                 self.push_queue_item(
                     saved.id,
@@ -404,6 +523,7 @@ impl RoadState {
                         entry: item.entry,
                         ready_at: item.ready_at,
                         route: item.route.into(),
+                        cohort: item.cohort,
                     },
                 )
                 .map_err(road_error)?;
@@ -450,6 +570,7 @@ impl RoadState {
     }
 
     pub(crate) fn tick(&mut self, tick: Tick) {
+        self.car_arrivals.clear();
         let requests = self.plan_moves(tick);
         let granted = self.reserve_moves(&requests);
         self.commit_moves(tick, &granted);
@@ -579,6 +700,7 @@ impl RoadState {
                     entry: QueueEntry::PrivateCars(remaining),
                     ready_at: head.ready_at,
                     route: head.route.clone(),
+                    cohort: head.cohort,
                 });
             }
             if let Some(to) = movement.to {
@@ -592,8 +714,176 @@ impl RoadState {
                         .checked_add(u64::from(target.spec.travel_ticks.get()))
                         .map(Tick::new),
                     route: head.route,
+                    cohort: head.cohort,
                 });
+            } else if let Some(cohort) = head.cohort {
+                self.car_arrivals.push((cohort, movement.units.get()));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{DischargeRate, SignalPhase};
+
+    fn lane(id: u64, travel_ticks: u32, capacity_mm: u32, kind: VehicleKind) -> LaneSpec {
+        LaneSpec {
+            id: LaneId::new(id),
+            capacity_mm: NonZeroU32::new(capacity_mm).unwrap(),
+            travel_ticks: NonZeroU32::new(travel_ticks).unwrap(),
+            discharge: DischargeRate {
+                millimetres: NonZeroU32::new(5_000).unwrap(),
+                ticks: NonZeroU32::MIN,
+            },
+            allowed: vec![kind],
+        }
+    }
+
+    fn movement(id: u64, from: u64, to: u64) -> MovementSpec {
+        MovementSpec {
+            id: MovementId::new(id),
+            from: LaneId::new(from),
+            to: LaneId::new(to),
+            junction: JunctionId::new(1),
+            conflict_zones: Vec::new(),
+            priority: 0,
+        }
+    }
+
+    fn road(
+        lanes: Vec<LaneSpec>,
+        movements: Vec<MovementSpec>,
+        phases: Vec<SignalPhase>,
+    ) -> RoadState {
+        RoadState::new(
+            lanes,
+            movements,
+            vec![JunctionSpec {
+                id: JunctionId::new(1),
+                phases,
+            }],
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn car_route_minimizes_travel_time_over_compatible_lanes() {
+        let road = road(
+            vec![
+                lane(1, 2, 5_000, VehicleKind::Car),
+                lane(2, 9, 5_000, VehicleKind::Car),
+                lane(3, 3, 5_000, VehicleKind::Car),
+                lane(4, 5, 5_000, VehicleKind::Car),
+                lane(5, 1, 5_000, VehicleKind::Bus),
+                lane(6, 1, 4_999, VehicleKind::Car),
+            ],
+            vec![
+                movement(1, 1, 2),
+                movement(2, 2, 4),
+                movement(4, 1, 3),
+                movement(7, 3, 4),
+                movement(3, 1, 3),
+                movement(5, 1, 5),
+                movement(6, 5, 4),
+                movement(8, 1, 6),
+                movement(9, 6, 4),
+                movement(10, 3, 1),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(
+            road.route(LaneId::new(1), LaneId::new(4)),
+            Some((10, vec![MovementId::new(3), MovementId::new(7)])),
+        );
+        assert_eq!(
+            road.route(LaneId::new(1), LaneId::new(1)),
+            Some((2, vec![]))
+        );
+        assert_eq!(road.route(LaneId::new(4), LaneId::new(1)), None);
+        assert_eq!(road.route(LaneId::new(1), LaneId::new(5)), None);
+        assert_eq!(road.route(LaneId::new(1), LaneId::new(999)), None);
+    }
+
+    #[test]
+    fn car_entries_take_source_travel_time_and_report_split_terminal_arrivals() {
+        let make_road = || {
+            road(
+                vec![
+                    lane(1, 2, 10_000, VehicleKind::Car),
+                    lane(2, 3, 10_000, VehicleKind::Car),
+                ],
+                vec![movement(1, 1, 2)],
+                Vec::new(),
+            )
+        };
+        let mut road = make_road();
+        let from = LaneId::new(1);
+        let route = [MovementId::new(1)];
+        assert_eq!(
+            road.enter_cars(from, &[MovementId::new(9)], 1, Tick::new(0), 1),
+            0
+        );
+        assert_eq!(road.enter_cars(from, &route, 3, Tick::new(0), 42), 2);
+        assert_eq!(road.enter_cars(from, &route, 1, Tick::new(0), 43), 0);
+        road.tick(Tick::new(1));
+        assert!(
+            road.observe(from, Tick::new(1))
+                .unwrap()
+                .departure
+                .is_none()
+        );
+        road.tick(Tick::new(2));
+        assert!(
+            road.observe(from, Tick::new(2))
+                .unwrap()
+                .departure
+                .is_some()
+        );
+        assert!(road.car_arrivals().next().is_none());
+        assert_eq!(
+            road.car_cohorts().collect::<Vec<_>>(),
+            vec![(42, 1), (42, 1)]
+        );
+
+        let (lanes, junctions) = road.snapshot();
+        let mut road = make_road();
+        road.restore(Tick::new(2), lanes, junctions).unwrap();
+        for i in 3..5 {
+            road.tick(Tick::new(i));
+            assert!(road.car_arrivals().next().is_none());
+        }
+        for i in 5..7 {
+            road.tick(Tick::new(i));
+            assert_eq!(road.car_arrivals().collect::<Vec<_>>(), vec![(42, 1)]);
+        }
+        road.tick(Tick::new(7));
+        assert!(road.car_arrivals().next().is_none());
+        assert!(road.car_cohorts().next().is_none());
+    }
+
+    #[test]
+    fn road_references_resolve_only_known_lanes_and_movements() {
+        let road = road(
+            vec![
+                lane(1, 1, 5_000, VehicleKind::Car),
+                lane(2, 1, 5_000, VehicleKind::Car),
+            ],
+            vec![movement(1, 1, 2)],
+            vec![SignalPhase {
+                green_ticks: NonZeroU32::MIN,
+                clearance_ticks: 1,
+                movements: vec![MovementId::new(1)],
+            }],
+        );
+        assert!(road.contains_lane(LaneId::new(1)));
+        assert!(!road.contains_lane(LaneId::new(3)));
+        assert!(road.contains_movement(MovementId::new(1)));
+        assert!(!road.contains_movement(MovementId::new(3)));
+        assert!(road.signal_allows(MovementId::new(1), Tick::new(1)));
+        assert!(!road.signal_allows(MovementId::new(1), Tick::new(2)));
+        assert!(!road.signal_allows(MovementId::new(3), Tick::new(1)));
     }
 }

@@ -1,12 +1,15 @@
 //! Deterministic, headless traffic simulation.
 
+mod demand;
 mod ids;
 mod junction;
 mod network;
 mod observe;
+mod routing;
 mod save;
 mod simulation;
 mod traffic;
+mod walking;
 mod world;
 
 pub use ids::{BuildingId, Tick};
@@ -23,3 +26,10 @@ pub use network::{
     VehicleId, VehicleKind,
 };
 pub use traffic::{LaneDeparture, LaneObservation, QueueEntry, TrafficSeed, WaitReason};
+
+pub use demand::{
+    ActiveJourney, DemandError, DemandObservation, DemandProfile, DemandSpec, TripPurpose, ZoneId,
+    ZoneSpec,
+};
+pub use routing::{JourneyMode, JourneyOption};
+pub use walking::{FootEdgeId, FootEdgeSpec, WalkingError};

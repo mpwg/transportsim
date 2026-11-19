@@ -140,9 +140,12 @@ impl Simulation {
             .checked_add(growth_ticks)
             .ok_or(AdvanceError::DevelopmentClockOverflow)?;
         for offset in 0..ticks {
+            let tick = Tick::new(start.seconds() + offset + 1);
             self.world
-                .road
-                .tick(Tick::new(start.seconds() + offset + 1));
+                .demand
+                .tick_before_road(tick, &mut self.world.road);
+            self.world.road.tick(tick);
+            self.world.demand.after_road(tick, &self.world.road);
         }
         self.traffic = end;
         self.development_ticks = development;
@@ -167,6 +170,19 @@ impl Simulation {
                 paused: self.paused,
                 growth_paused: self.growth_paused,
             })),
+            Query::Demand => Ok(Observation::Demand(self.world.demand.observe())),
+            Query::Journeys { from, to } => {
+                for zone in [from, to] {
+                    if !self.world.demand.contains_zone(zone) {
+                        return Err(QueryError::UnknownZone(zone));
+                    }
+                }
+                Ok(Observation::Journeys(self.world.demand.alternatives(
+                    from,
+                    to,
+                    &self.world.road,
+                )))
+            }
             Query::Lane(id) => self
                 .world
                 .road

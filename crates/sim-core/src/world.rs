@@ -1,7 +1,7 @@
-use crate::traffic::RoadState;
 use crate::{
     BuildingId, JunctionSpec, LaneSpec, MovementSpec, RoadValidationError, Tick, TrafficSeed,
 };
+use crate::{DemandError, DemandSpec, demand::DemandState, traffic::RoadState};
 use std::{collections::BTreeSet, fmt, num::NonZeroU64};
 
 /// Initial conditions supplied by a scenario author.
@@ -14,6 +14,7 @@ pub struct Scenario {
     pub movements: Vec<MovementSpec>,
     pub junctions: Vec<JunctionSpec>,
     pub traffic: Vec<TrafficSeed>,
+    pub demand: DemandSpec,
 }
 
 impl Scenario {
@@ -25,6 +26,7 @@ impl Scenario {
             movements: Vec::new(),
             junctions: Vec::new(),
             traffic: Vec::new(),
+            demand: DemandSpec::default(),
         }
     }
 }
@@ -58,12 +60,14 @@ impl Default for RuleSet {
 pub enum ValidationError {
     DuplicateBuildingId { id: BuildingId, index: usize },
     Road(RoadValidationError),
+    Demand(DemandError),
 }
 
 impl fmt::Display for ValidationError {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Road(error) => error.fmt(out),
+            Self::Demand(error) => error.fmt(out),
             Self::DuplicateBuildingId { id, index } => {
                 write!(
                     out,
@@ -81,6 +85,7 @@ impl std::error::Error for ValidationError {}
 pub(crate) struct World {
     pub(crate) buildings: BTreeSet<BuildingId>,
     pub(crate) road: RoadState,
+    pub(crate) demand: DemandState,
 }
 
 impl World {
@@ -98,6 +103,11 @@ impl World {
             scenario.traffic,
         )
         .map_err(ValidationError::Road)?;
-        Ok(Self { buildings, road })
+        let demand = DemandState::new(scenario.demand, &road).map_err(ValidationError::Demand)?;
+        Ok(Self {
+            buildings,
+            road,
+            demand,
+        })
     }
 }

@@ -7,6 +7,7 @@ use crate::{
     BuildingId, JunctionId, JunctionSpec, LaneDeparture, LaneId, LaneSpec, MovementId,
     MovementSpec, QueueEntry, RuleSet, Scenario, Simulation, Tick, TrafficSeed, WaitReason,
 };
+use crate::{DemandSpec, demand::DemandSnapshot};
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -19,6 +20,8 @@ pub(super) struct ScenarioV1 {
     movements: Vec<MovementSpec>,
     junctions: Vec<JunctionSpec>,
     traffic: Vec<TrafficSeed>,
+    #[serde(default, skip_serializing_if = "DemandSpec::is_default")]
+    demand: DemandSpec,
 }
 
 impl ScenarioV1 {
@@ -30,12 +33,14 @@ impl ScenarioV1 {
             mut movements,
             mut junctions,
             mut traffic,
+            mut demand,
         } = sim.scenario.clone();
         building_ids.sort_unstable();
         lanes.sort_unstable_by_key(|lane| lane.id);
         movements.sort_unstable_by_key(|movement| movement.id);
         junctions.sort_unstable_by_key(|junction| junction.id);
         traffic.sort_by_key(|item| item.lane);
+        demand.sort_tables();
         Self {
             seed: sim.seed,
             start,
@@ -46,6 +51,7 @@ impl ScenarioV1 {
             movements,
             junctions,
             traffic,
+            demand,
         }
     }
 
@@ -57,6 +63,7 @@ impl ScenarioV1 {
             movements: self.movements,
             junctions: self.junctions,
             traffic: self.traffic,
+            demand: self.demand,
         };
         Simulation::new_game(
             scenario,
@@ -78,6 +85,8 @@ pub(super) struct Payload {
     growth_paused: bool,
     lanes: Vec<LaneV1>,
     junctions: Vec<JunctionV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    demand: Option<DemandSnapshot>,
 }
 
 impl Payload {
@@ -92,6 +101,7 @@ impl Payload {
             growth_paused: sim.growth_paused,
             lanes,
             junctions,
+            demand: sim.world.demand.snapshot(),
         }
     }
 
@@ -110,6 +120,9 @@ impl Payload {
         sim.world
             .road
             .restore(self.tick, self.lanes, self.junctions)?;
+        sim.world
+            .demand
+            .restore(self.demand, self.tick, &sim.world.road)?;
         sim.traffic = self.tick;
         sim.development_ticks = self.development_ticks;
         sim.sequence = self.sequence;
@@ -135,6 +148,8 @@ pub(crate) struct QueueItemV1 {
     pub(crate) entry: QueueEntry,
     pub(crate) ready_at: Option<Tick>,
     pub(crate) route: Vec<MovementId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cohort: Option<u64>,
 }
 
 #[derive(Deserialize, Serialize)]
