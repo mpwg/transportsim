@@ -9,6 +9,7 @@ mod routing;
 mod save;
 mod service;
 mod simulation;
+mod taxi;
 mod traffic;
 mod walking;
 mod world;
@@ -38,4 +39,9 @@ pub use walking::{FootEdgeId, FootEdgeSpec, WalkingError};
 pub use service::{
     FleetSpec, LineId, LineObservation, LineSpec, ServiceError, ServiceObservation, ServiceSpec,
     ServiceVehicleObservation, StopId, StopObservation, StopSpec, TimetableObservation,
+};
+
+pub use taxi::{
+    TaxiAssignment, TaxiError, TaxiObservation, TaxiSpec, TaxiStatus, TaxiVehicleObservation,
+    TaxiVehicleSpec,
 };

@@ -1,3 +1,4 @@
+use crate::taxi::{TaxiSnapshot, TaxiSpec};
 use std::num::NonZeroU64;
 
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,8 @@ pub(super) struct ScenarioV1 {
     demand: DemandSpec,
     #[serde(default, skip_serializing_if = "ServiceSpec::is_empty")]
     service: ServiceSpec,
+    #[serde(default, skip_serializing_if = "TaxiSpec::is_empty")]
+    taxi: TaxiSpec,
 }
 
 impl ScenarioV1 {
@@ -37,6 +40,7 @@ impl ScenarioV1 {
             mut traffic,
             mut demand,
             mut service,
+            mut taxi,
         } = sim.scenario.clone();
         building_ids.sort_unstable();
         lanes.sort_unstable_by_key(|lane| lane.id);
@@ -45,6 +49,7 @@ impl ScenarioV1 {
         traffic.sort_by_key(|item| item.lane);
         demand.sort_tables();
         service.sort_tables();
+        taxi.sort_tables();
         Self {
             seed: sim.seed,
             start,
@@ -57,6 +62,7 @@ impl ScenarioV1 {
             traffic,
             demand,
             service,
+            taxi,
         }
     }
 
@@ -70,6 +76,7 @@ impl ScenarioV1 {
             traffic: self.traffic,
             demand: self.demand,
             service: self.service,
+            taxi: self.taxi,
         };
         Simulation::new_game(
             scenario,
@@ -95,6 +102,8 @@ pub(super) struct Payload {
     demand: Option<DemandSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     service: Option<ServiceSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    taxi: Option<TaxiSnapshot>,
 }
 
 impl Payload {
@@ -111,6 +120,7 @@ impl Payload {
             junctions,
             demand: sim.world.demand.snapshot(),
             service: sim.world.service.snapshot(),
+            taxi: sim.world.taxi.snapshot(),
         }
     }
 
@@ -133,8 +143,15 @@ impl Payload {
             .service
             .restore(self.service, self.tick, &sim.world.road)?;
         sim.world
-            .demand
-            .restore(self.demand, self.tick, &sim.world.road, &sim.world.service)?;
+            .taxi
+            .restore(self.taxi, self.tick, &sim.world.road)?;
+        sim.world.demand.restore(
+            self.demand,
+            self.tick,
+            &sim.world.road,
+            &sim.world.service,
+            &sim.world.taxi,
+        )?;
         sim.traffic = self.tick;
         sim.development_ticks = self.development_ticks;
         sim.sequence = self.sequence;

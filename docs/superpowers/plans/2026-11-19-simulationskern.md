@@ -122,10 +122,10 @@ Ein `CommandReceipt` enthält Tick, Eingabesequenz, betroffene IDs und fachliche
 
 **Dateien** `crates/sim-core/src/{taxi,service,demand,traffic,observe}.rs`, `crates/sim-core/tests/taxi.rs`.
 
-- [ ] `taxi` testet gleich nahe Fahrzeuge 7 und 9 → nur 7 reserviert den Wunsch. Ein zweiter gleichzeitiger Wunsch wird nicht zusätzlich an 7 vergeben. Reservierte Reisemengen zählen bis zur Abholung einmal als wartend. Eine freie Strecke mit zwei Ticks Anfahrt und drei Ticks besetzter Fahrt wird gegen dieselbe Strecke mit Rückstau verglichen.
-- [ ] `cargo test -p sim-core --test taxi` rot prüfen.
-- [ ] `TaxiState::dispatch(&mut self, tick: Tick, …)` bei der Halteabwicklung vor Bewegungsplanung verdrahten. Ältester bedienbarer Wunsch, kürzeste erreichbare Leerfahrt, dann ID. Gleiche Ziele und Abholorte bis zur Fahrzeugkapazität bündeln. Die Zustände und Buchung von Abholung, Reise und Ankunft atomar wechseln. Leerfahrt belegt denselben Spurraum wie besetzte Fahrt.
-- [ ] Neustarts während Leerfahrt und mit Fahrgast vergleichen. Einzeltest und Workspace grün. Commit `feat: Taxiaufträge einzeln disponieren`.
+- [x] `taxi` testet gleich nahe Fahrzeuge 7 und 9 → nur 7 reserviert den Wunsch. Ein zweiter gleichzeitiger Wunsch wird nicht zusätzlich an 7 vergeben. Reservierte Reisemengen zählen bis zur Abholung einmal als wartend. Eine freie Strecke mit zwei Ticks Anfahrt und drei Ticks besetzter Fahrt wird gegen dieselbe Strecke mit Rückstau verglichen.
+- [x] `cargo test -p sim-core --test taxi` rot prüfen.
+- [x] `TaxiState::dispatch(&mut self, tick: Tick, …)` bei der Halteabwicklung vor Bewegungsplanung verdrahten. Ältester bedienbarer Wunsch, kürzeste erreichbare Leerfahrt, dann ID. Gleiche Ziele und Abholorte bis zur Fahrzeugkapazität bündeln. Die Zustände und Buchung von Abholung, Reise und Ankunft atomar wechseln. Leerfahrt belegt denselben Spurraum wie besetzte Fahrt.
+- [x] Neustarts während Leerfahrt und mit Fahrgast vergleichen. Einzeltest und Workspace grün. Commit `feat: Taxiaufträge einzeln disponieren`.
 
 ## Etappe C · Umbauen und experimentieren
 

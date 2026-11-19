@@ -676,7 +676,11 @@ impl Service {
     ) -> Result<(), LoadError> {
         let invalid = |field| LoadError::InvalidState { field };
         let Some(snapshot) = snapshot else {
-            if self.lines.is_empty() && road.managed_vehicles().next().is_none() {
+            if self.lines.is_empty()
+                && !road
+                    .managed_vehicles()
+                    .any(|(_, _, kind)| kind != VehicleKind::Taxi)
+            {
                 return Ok(());
             }
             return Err(invalid("service"));
@@ -706,6 +710,7 @@ impl Service {
         }
         let mut managed: BTreeMap<_, _> = road
             .managed_vehicles()
+            .filter(|(_, _, kind)| *kind != VehicleKind::Taxi)
             .map(|(id, lane, kind)| (id, (lane, kind)))
             .collect();
         for (&id, &phase) in &snapshot.vehicles {

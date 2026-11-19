@@ -1,3 +1,4 @@
+use crate::taxi::{Taxi, TaxiError, TaxiSpec};
 use crate::{
     BuildingId, JunctionSpec, LaneSpec, MovementSpec, RoadValidationError, Tick, TrafficSeed,
 };
@@ -17,6 +18,7 @@ pub struct Scenario {
     pub traffic: Vec<TrafficSeed>,
     pub demand: DemandSpec,
     pub service: ServiceSpec,
+    pub taxi: TaxiSpec,
 }
 
 impl Scenario {
@@ -30,6 +32,7 @@ impl Scenario {
             traffic: Vec::new(),
             demand: DemandSpec::default(),
             service: ServiceSpec::default(),
+            taxi: TaxiSpec::default(),
         }
     }
 }
@@ -65,6 +68,7 @@ pub enum ValidationError {
     Road(RoadValidationError),
     Demand(DemandError),
     Service(ServiceError),
+    Taxi(TaxiError),
 }
 
 impl fmt::Display for ValidationError {
@@ -73,6 +77,7 @@ impl fmt::Display for ValidationError {
             Self::Road(error) => error.fmt(out),
             Self::Demand(error) => error.fmt(out),
             Self::Service(error) => error.fmt(out),
+            Self::Taxi(error) => error.fmt(out),
             Self::DuplicateBuildingId { id, index } => {
                 write!(
                     out,
@@ -92,6 +97,7 @@ pub(crate) struct World {
     pub(crate) road: RoadState,
     pub(crate) demand: DemandState,
     pub(crate) service: Service,
+    pub(crate) taxi: Taxi,
 }
 
 impl World {
@@ -118,6 +124,12 @@ impl World {
         )
         .map_err(ValidationError::Road)?;
         let demand = DemandState::new(scenario.demand, &road).map_err(ValidationError::Demand)?;
+        let line_vehicles: BTreeSet<_> = scenario
+            .service
+            .fleet
+            .iter()
+            .map(|vehicle| vehicle.id)
+            .collect();
         let service = Service::new(
             scenario.service,
             &road,
@@ -125,11 +137,16 @@ impl World {
             |id| seeded_vehicles.contains(&id),
         )
         .map_err(ValidationError::Service)?;
+        let taxi = Taxi::new(scenario.taxi, demand.road_accesses(), &road, |id| {
+            seeded_vehicles.contains(&id) || line_vehicles.contains(&id)
+        })
+        .map_err(ValidationError::Taxi)?;
         Ok(Self {
             buildings,
             road,
             demand,
             service,
+            taxi,
         })
     }
 }

@@ -565,3 +565,126 @@ fn new_process_resumes_passengers_mid_transfer() {
     let arrived: Value = serde_json::from_slice(&fs::read(destination).unwrap()).unwrap();
     assert_eq!(arrived["payload"]["demand"]["arrived"], 4);
 }
+
+#[test]
+fn new_process_resumes_taxi_before_pickup_and_with_passenger() {
+    use serde_json::json;
+    use sim_core::{DemandObservation, Observation, Query, Simulation};
+
+    fn saved_demand(path: &Path) -> DemandObservation {
+        let simulation = Simulation::load(&fs::read(path).unwrap()).unwrap();
+        let Observation::Demand(demand) = simulation.inspect(Query::Demand).unwrap() else {
+            panic!("expected demand observation");
+        };
+        demand
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = dir.path().join("taxi.json");
+    let full_trace = dir.path().join("full.jsonl");
+    let destination = dir.path().join("destination.json");
+    let lanes: Vec<_> = [(1, 1), (2, 3), (3, 1)]
+        .into_iter()
+        .map(|(id, travel_ticks)| {
+            json!({
+                "id": id, "capacity_mm": 30000, "travel_ticks": travel_ticks,
+                "discharge": {"millimetres": 30000, "ticks": 1}, "allowed": ["taxi"]
+            })
+        })
+        .collect();
+    let movements: Vec<_> = [(1, 3, 1), (2, 1, 2), (3, 2, 1)]
+        .into_iter()
+        .map(|(id, from, to)| {
+            json!({
+                "id": id, "from": from, "to": to, "junction": 1,
+                "conflict_zones": [id], "priority": 0
+            })
+        })
+        .collect();
+    let scenario = json!({
+        "seed": 42, "start": 0, "development_period_ticks": 86400, "building_ids": [],
+        "lanes": lanes, "movements": movements, "traffic": [],
+        "junctions": [{"id": 1, "phases": [
+            {"green_ticks": 4, "clearance_ticks": 0, "movements": [2, 3]},
+            {"green_ticks": 60, "clearance_ticks": 0, "movements": [1, 2, 3]}
+        ]}],
+        "demand": {
+            "zones": [
+                {"id": 1, "residents": 1, "jobs": 0, "shops": 0, "road_access": 1},
+                {"id": 2, "residents": 0, "jobs": 1, "shops": 0, "road_access": 2},
+                {"id": 3, "residents": 0, "jobs": 0, "shops": 0, "road_access": 3}
+            ],
+            "walk_weight": 0, "car_weight": 0,
+            "profiles": [{"purpose": "work", "departure_offsets": [0], "return_offset": 1000,
+                "rate_numerator": 1, "rate_denominator": 1}]
+        },
+        "taxi": {"fleet": [
+            {"id": 9, "start": 3, "length_mm": 5000, "capacity": 2},
+            {"id": 7, "start": 3, "length_mm": 5000, "capacity": 2}
+        ]}
+    });
+    fs::write(&fixture, serde_json::to_vec(&scenario).unwrap()).unwrap();
+
+    let uninterrupted = summary(run(&[
+        ("--scenario", fixture.as_os_str()),
+        ("--until-tick", OsStr::new("9")),
+        ("--trace", full_trace.as_os_str()),
+        ("--save", destination.as_os_str()),
+    ]));
+    assert_eq!(uninterrupted["tick"], 9);
+    let arrived = saved_demand(&destination);
+    assert_eq!(arrived.arrived, 1);
+    assert_eq!(arrived.total_travel_ticks, 8);
+
+    let taxi = json!({"id": 7, "kind": "taxi", "length_mm": 5000});
+    let full = trace(&full_trace);
+    assert_eq!(full.len(), 9);
+    assert_eq!(full[3]["lanes"][2]["wait_reason"], "red_signal");
+    assert_eq!(full[3]["lanes"][2]["queue"][0]["vehicle"], taxi);
+    assert_eq!(
+        full[4]["lanes"][2]["departure"],
+        json!({
+            "entry": {"vehicle": taxi}, "to": 1
+        })
+    );
+    assert_eq!(full[5]["lanes"][1]["queue"][0]["vehicle"], taxi);
+    assert_eq!(full[8]["lanes"][1]["queue"], json!([]));
+
+    let mut checkpoints = Vec::new();
+    for (tick, waiting, in_transit) in [(4_usize, 1, 0), (6, 0, 1)] {
+        let checkpoint = dir.path().join(format!("checkpoint-{tick}.json"));
+        let state = summary(run(&[
+            ("--scenario", fixture.as_os_str()),
+            ("--until-tick", tick.to_string().as_ref()),
+            ("--save", checkpoint.as_os_str()),
+        ]));
+        assert_eq!(state["tick"], tick);
+        let demand = saved_demand(&checkpoint);
+        assert_eq!(demand.waiting, waiting, "checkpoint at tick {tick}");
+        assert_eq!(demand.in_transit, in_transit, "checkpoint at tick {tick}");
+        checkpoints.push((tick, checkpoint, state));
+    }
+
+    fs::remove_file(fixture).unwrap();
+    let full_jsonl = fs::read_to_string(full_trace).unwrap();
+    let suffix_trace = dir.path().join("suffix.jsonl");
+    for (tick, checkpoint, state) in checkpoints {
+        assert_eq!(
+            summary(run(&[("--load", checkpoint.as_os_str())])),
+            state,
+            "loading checkpoint at tick {tick}"
+        );
+        let resumed = summary(run(&[
+            ("--load", checkpoint.as_os_str()),
+            ("--until-tick", OsStr::new("9")),
+            ("--trace", suffix_trace.as_os_str()),
+        ]));
+        assert_eq!(resumed, uninterrupted, "resuming from tick {tick}");
+        let expected: String = full_jsonl.split_inclusive('\n').skip(tick).collect();
+        assert_eq!(
+            fs::read_to_string(&suffix_trace).unwrap(),
+            expected,
+            "trace after tick {tick}"
+        );
+    }
+}

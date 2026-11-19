@@ -11,6 +11,7 @@ pub enum JourneyMode {
     Walk,
     Car,
     Transit,
+    Taxi,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,6 +30,7 @@ pub struct JourneyOption {
 pub(crate) enum JourneyPath {
     Walk(Vec<FootEdgeId>),
     Transit(transit::TransitPath),
+    Taxi,
     Car {
         from: LaneId,
         movements: Vec<MovementId>,
@@ -38,6 +40,7 @@ pub(crate) enum JourneyPath {
 impl JourneyPath {
     pub(crate) fn mode(&self) -> JourneyMode {
         match self {
+            Self::Taxi => JourneyMode::Taxi,
             Self::Transit(_) => JourneyMode::Transit,
             Self::Walk(_) => JourneyMode::Walk,
             Self::Car { .. } => JourneyMode::Car,

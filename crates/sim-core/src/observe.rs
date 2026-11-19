@@ -1,3 +1,4 @@
+use crate::taxi::TaxiObservation;
 use crate::{
     BuildingId, DemandObservation, JourneyOption, LaneId, LaneObservation, ServiceObservation,
     Tick, TimetableObservation, ZoneId,
@@ -10,6 +11,7 @@ pub enum Query {
     Clock,
     Demand,
     Service,
+    Taxi,
     TimetableJourney { from: ZoneId, to: ZoneId },
     Journeys { from: ZoneId, to: ZoneId },
     Building(BuildingId),
@@ -22,6 +24,7 @@ pub enum Observation {
     Clock(ClockObservation),
     Demand(DemandObservation),
     Service(ServiceObservation),
+    Taxi(TaxiObservation),
     TimetableJourney(Option<TimetableObservation>),
     Journeys(Vec<JourneyOption>),
     Building(BuildingId),

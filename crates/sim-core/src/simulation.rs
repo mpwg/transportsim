@@ -150,9 +150,14 @@ impl Simulation {
             .ok_or(AdvanceError::DevelopmentClockOverflow)?;
         for offset in 0..ticks {
             let tick = Tick::new(start.seconds() + offset + 1);
-            self.world
-                .demand
-                .tick_before_road(tick, &mut self.world.road, &mut self.world.service);
+            self.world.demand.tick_before_road(
+                tick,
+                &mut self.world.road,
+                &mut self.world.service,
+                &mut self.world.taxi,
+            );
+            let taxi_arrivals = self.world.taxi.tick(tick, &mut self.world.road);
+            self.world.demand.taxi_arrivals(taxi_arrivals, tick);
             let alighting = self.world.service.arrive_at_stops(tick, &self.world.road);
             if !alighting.is_empty() {
                 self.world.demand.alighting(alighting, tick);
@@ -202,7 +207,10 @@ impl Simulation {
                 )))
             }
             Query::Service => Ok(Observation::Service(self.world.service.observe())),
-            Query::Demand => Ok(Observation::Demand(self.world.demand.observe())),
+            Query::Taxi => Ok(Observation::Taxi(self.world.taxi.observe())),
+            Query::Demand => Ok(Observation::Demand(
+                self.world.demand.observe(&self.world.taxi),
+            )),
             Query::Journeys { from, to } => {
                 for zone in [from, to] {
                     if !self.world.demand.contains_zone(zone) {
@@ -215,6 +223,7 @@ impl Simulation {
                     self.traffic,
                     &self.world.road,
                     &self.world.service,
+                    &self.world.taxi,
                 )))
             }
             Query::Lane(id) => self

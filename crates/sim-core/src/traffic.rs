@@ -351,6 +351,23 @@ impl RoadState {
         self.lanes.contains_key(&id)
     }
 
+    pub(crate) fn managed_vehicle_endpoint(
+        &self,
+        vehicle: VehicleId,
+    ) -> Option<(LaneId, NonZeroU32)> {
+        self.lanes.iter().find_map(|(&lane, state)| {
+            state.queue.iter().find_map(|item| {
+                let QueueEntry::Vehicle { id, length_mm, .. } = item.entry else {
+                    return None;
+                };
+                (item.managed && id == vehicle).then(|| {
+                    let endpoint = item.route.back().map_or(lane, |id| self.movements[id].to);
+                    (endpoint, length_mm)
+                })
+            })
+        })
+    }
+
     pub(crate) fn departed_vehicle(&self, lane: LaneId, vehicle: VehicleId) -> bool {
         self.lanes
             .get(&lane)
