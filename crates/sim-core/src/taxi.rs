@@ -68,6 +68,8 @@ pub struct TaxiVehicleObservation {
     pub id: VehicleId,
     pub capacity: u32,
     pub status: TaxiStatus,
+    /// The assigned trip is waiting for a road connection.
+    pub disconnected: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -186,11 +188,10 @@ impl Taxi {
         )
     }
 
-    pub(crate) fn can_carry(&self, origin: ZoneId, destination: ZoneId, road: &RoadState) -> bool {
-        self.fleet.values().any(|vehicle| {
-            self.route(origin, destination, vehicle.length_mm, road)
-                .is_some()
-        })
+    pub(crate) fn has_access_pair(&self, origin: ZoneId, destination: ZoneId) -> bool {
+        !self.fleet.is_empty()
+            && self.access.contains_key(&origin)
+            && self.access.contains_key(&destination)
     }
 
     pub(crate) fn estimate(
@@ -430,7 +431,7 @@ impl Taxi {
             })
     }
 
-    pub(crate) fn observe(&self) -> TaxiObservation {
+    pub(crate) fn observe(&self, tick: Tick, road: &RoadState) -> TaxiObservation {
         let mut waiting_total = 0;
         let mut oldest_waiting_since = None;
         for request in self.waiting() {
@@ -460,10 +461,29 @@ impl Taxi {
                             assignment: assignment(passengers),
                         },
                     };
+                    let vehicle = &self.fleet[&id];
+                    let disconnected = match status {
+                        TaxiStatus::Idle { .. } => false,
+                        TaxiStatus::Occupied { .. } => road.managed_vehicle_blocked(id),
+                        TaxiStatus::ToPickup { assignment } => {
+                            road.managed_vehicle_blocked(id)
+                                || (road.vehicle_at_stop(id, tick)
+                                    == Some(self.access[&assignment.origin])
+                                    && self
+                                        .route(
+                                            assignment.origin,
+                                            assignment.destination,
+                                            vehicle.length_mm,
+                                            road,
+                                        )
+                                        .is_none())
+                        }
+                    };
                     TaxiVehicleObservation {
                         id,
-                        capacity: self.fleet[&id].capacity.get(),
+                        capacity: vehicle.capacity.get(),
                         status,
+                        disconnected,
                     }
                 })
                 .collect(),
@@ -532,9 +552,7 @@ impl Taxi {
                     .map(|request| u64::from(request.count))
                     .sum::<u64>()
                     > u64::from(vehicle.capacity.get())
-                || self
-                    .route(first.origin, first.destination, vehicle.length_mm, road)
-                    .is_none()
+                || !self.has_access_pair(first.origin, first.destination)
             {
                 return Err(invalid("taxi.assignment"));
             }

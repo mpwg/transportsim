@@ -1,7 +1,7 @@
 use super::{Line, Progress, StopObservation};
-use crate::{FleetSpec, LineId, LineSpec, LoadError, StopId, StopSpec, Tick, VehicleId};
+use crate::{FleetSpec, LineId, LoadError, StopId, StopSpec, Tick, VehicleId, ZoneId};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -20,6 +20,7 @@ pub(crate) struct Alighting {
     pub(crate) cohort: u64,
     pub(crate) leg: usize,
     pub(crate) count: u32,
+    pub(crate) replan_at: Option<ZoneId>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -39,14 +40,19 @@ pub(super) struct PassengerState {
     onboard: BTreeMap<VehicleId, Vec<OnboardPassengers>>,
 }
 
-pub(super) fn serves(lines: &BTreeMap<LineId, Line>, request: &PassengerRequest) -> bool {
-    lines.get(&request.line).is_some_and(|line| {
+pub(super) fn serves(
+    lines: &BTreeMap<LineId, Line>,
+    line: LineId,
+    board: StopId,
+    alight: StopId,
+) -> bool {
+    lines.get(&line).is_some_and(|line| {
         line.spec
             .stops
             .iter()
-            .skip_while(|&&id| id != request.board)
+            .skip_while(|&&id| id != board)
             .skip(1)
-            .any(|&id| id == request.alight)
+            .any(|&id| id == alight)
     })
 }
 
@@ -75,20 +81,26 @@ impl PassengerState {
     pub(super) fn alight(
         &mut self,
         vehicle: VehicleId,
-        stop_index: usize,
+        stop_index: Option<usize>,
+        replan_at: Option<ZoneId>,
         completed: &mut Vec<Alighting>,
     ) -> u32 {
         let mut alighted = 0;
         if let Some(groups) = self.onboard.get_mut(&vehicle) {
             groups.retain(|group| {
-                if group.alight_index != stop_index {
+                let replan_at = if Some(group.alight_index) == stop_index {
+                    None
+                } else if let Some(zone) = replan_at {
+                    Some(zone)
+                } else {
                     return true;
-                }
+                };
                 alighted += group.count;
                 completed.push(Alighting {
                     cohort: group.cohort,
                     leg: group.leg,
                     count: group.count,
+                    replan_at,
                 });
                 false
             });
@@ -99,24 +111,50 @@ impl PassengerState {
         alighted
     }
 
+    pub(super) fn release_disconnected_waiters(
+        &mut self,
+        lines: &BTreeSet<LineId>,
+        stops: &BTreeMap<StopId, StopSpec>,
+        released: &mut Vec<Alighting>,
+    ) {
+        if lines.is_empty() {
+            return;
+        }
+        self.waiting.retain(|id, groups| {
+            groups.retain(|group| {
+                if !lines.contains(&group.line) {
+                    return true;
+                }
+                released.push(Alighting {
+                    cohort: group.cohort,
+                    leg: group.leg,
+                    count: group.count,
+                    replan_at: Some(stops[id].zone),
+                });
+                false
+            });
+            !groups.is_empty()
+        });
+    }
+
     pub(super) fn board(
         &mut self,
         vehicle: &FleetSpec,
-        line: &LineSpec,
+        line: &Line,
         stop_index: usize,
         tick: Tick,
     ) -> u32 {
-        let stop = line.stops[stop_index];
+        let stop = line.spec.stops[stop_index];
+        let following_stops = line.reachable_stops_after(stop_index);
         let available = vehicle.capacity.get() - self.onboard_total(vehicle.id);
         let Some(queue) = self.waiting.get_mut(&stop) else {
             return 0;
         };
         let mut boarded = 0;
         queue.retain_mut(|group| {
-            if boarded == available || group.line != line.id || group.since > tick {
+            if boarded == available || group.line != line.spec.id || group.since > tick {
                 return true;
             }
-            let following_stops = &line.stops[stop_index + 1..];
             let Some(offset) = following_stops.iter().position(|&id| id == group.alight) else {
                 return true;
             };
@@ -224,7 +262,7 @@ impl PassengerState {
                     group.board != id
                         || group.count == 0
                         || group.since > tick
-                        || !serves(lines, group)
+                        || !serves(lines, group.line, group.board, group.alight)
                 })
                 || !fits(groups.iter().map(|group| group.count), stop.capacity.get())
             {

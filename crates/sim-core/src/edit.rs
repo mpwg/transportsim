@@ -7,8 +7,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BuildingId, Cell, FootEdgeId, FootEdgeSpec, JunctionSpec, LaneId, LaneSpec, LineId, LoadError,
-    MovementId, MovementSpec, Scenario, Simulation, StreetSite, ValidationError,
+    BuildingId, Cell, FleetSpec, FootEdgeId, FootEdgeSpec, JunctionSpec, LaneId, LaneSpec, LineId,
+    LineSpec, LoadError, MovementId, MovementSpec, Scenario, Simulation, StopId, StopSpec,
+    StreetSite, ValidationError, VehicleId,
     demand::DemandSnapshot,
     save::v1::{CarRecoveryV1, JunctionV1, LaneV1},
     world::World,
@@ -50,6 +51,12 @@ pub enum EditAction {
         greenery_width_mm: u32,
     },
     AddTurnPocket(TurnPocket),
+    UpsertStop(StopSpec),
+    RemoveStop(StopId),
+    UpsertLine(LineSpec),
+    RemoveLine(LineId),
+    UpsertLineVehicle(FleetSpec),
+    RemoveLineVehicle(VehicleId),
     SetHeadway {
         line: LineId,
         ticks: NonZeroU32,
@@ -72,6 +79,9 @@ pub struct EditPreview {
     pub affected_lanes: Vec<LaneId>,
     pub affected_foot_edges: Vec<FootEdgeId>,
     pub affected_buildings: Vec<BuildingId>,
+    pub affected_stops: Vec<StopId>,
+    pub affected_lines: Vec<LineId>,
+    pub affected_line_vehicles: Vec<VehicleId>,
     pub relocated_vehicles: u64,
     pub rerouted_vehicles: u64,
     pub blocked_vehicles: u64,
@@ -89,6 +99,9 @@ pub enum EditError {
     MissingFootEdge(FootEdgeId),
     MissingStreet(LaneId),
     MissingLine(LineId),
+    MissingStop(StopId),
+    MissingLineVehicle(VehicleId),
+    VehicleInUse(VehicleId),
     Occupied(LaneId),
     InvalidPocket(LaneId),
     WouldInvalidate(LoadError),
@@ -107,6 +120,9 @@ impl fmt::Display for EditError {
             Self::MissingStreet(id) => write!(out, "no street profile for lane {}", id.get()),
             Self::MissingFootEdge(id) => write!(out, "unknown foot edge {}", id.get()),
             Self::MissingMovement(id) => write!(out, "unknown movement {}", id.get()),
+            Self::MissingStop(id) => write!(out, "unknown stop {}", id.get()),
+            Self::VehicleInUse(id) => write!(out, "vehicle ID {} is already on the road", id.get()),
+            Self::MissingLineVehicle(id) => write!(out, "unknown line vehicle {}", id.get()),
             Self::MissingLine(id) => write!(out, "unknown line {}", id.get()),
             Self::Occupied(lane) => write!(
                 out,
@@ -151,6 +167,9 @@ struct Draft {
     affected: BTreeSet<LaneId>,
     affected_foot_edges: BTreeSet<FootEdgeId>,
     affected_buildings: BTreeSet<BuildingId>,
+    affected_stops: BTreeSet<StopId>,
+    affected_lines: BTreeSet<LineId>,
+    affected_line_vehicles: BTreeSet<VehicleId>,
     relocated_vehicles: u64,
     headways: BTreeMap<LineId, NonZeroU32>,
 }
@@ -169,6 +188,9 @@ impl Draft {
             affected: BTreeSet::new(),
             affected_foot_edges: BTreeSet::new(),
             affected_buildings: BTreeSet::new(),
+            affected_stops: BTreeSet::new(),
+            affected_lines: BTreeSet::new(),
+            affected_line_vehicles: BTreeSet::new(),
             relocated_vehicles: 0,
             headways: BTreeMap::new(),
         }
@@ -312,6 +334,42 @@ impl Draft {
                 self.set_street_widths(*lane, *road_width_mm, *foot_width_mm, *greenery_width_mm)?;
             }
             EditAction::AddTurnPocket(pocket) => self.pocket(pocket, tick)?,
+            EditAction::UpsertStop(stop) => {
+                upsert(&mut self.scenario.service.stops, stop, |old| {
+                    old.id == stop.id
+                });
+                self.affected_stops.insert(stop.id);
+            }
+            EditAction::RemoveStop(id) => {
+                remove(&mut self.scenario.service.stops, |stop| stop.id == *id)
+                    .ok_or(EditError::MissingStop(*id))?;
+                self.affected_stops.insert(*id);
+            }
+            EditAction::UpsertLine(line) => {
+                upsert(&mut self.scenario.service.lines, line, |old| {
+                    old.id == line.id
+                });
+                self.affected_lines.insert(line.id);
+            }
+            EditAction::RemoveLine(id) => {
+                remove(&mut self.scenario.service.lines, |line| line.id == *id)
+                    .ok_or(EditError::MissingLine(*id))?;
+                self.headways.remove(id);
+                self.affected_lines.insert(*id);
+            }
+            EditAction::UpsertLineVehicle(vehicle) => {
+                upsert(&mut self.scenario.service.fleet, vehicle, |old| {
+                    old.id == vehicle.id
+                });
+                self.affected_line_vehicles.insert(vehicle.id);
+            }
+            EditAction::RemoveLineVehicle(id) => {
+                remove(&mut self.scenario.service.fleet, |vehicle| {
+                    vehicle.id == *id
+                })
+                .ok_or(EditError::MissingLineVehicle(*id))?;
+                self.affected_line_vehicles.insert(*id);
+            }
             EditAction::SetHeadway { line, ticks } => {
                 if !self
                     .scenario
@@ -323,6 +381,7 @@ impl Draft {
                     return Err(EditError::MissingLine(*line));
                 }
                 self.headways.insert(*line, *ticks);
+                self.affected_lines.insert(*line);
             }
         }
         Ok(())
@@ -414,6 +473,22 @@ impl Draft {
     }
 
     fn normalize(&mut self) -> Result<(), EditError> {
+        let assigned_vehicles: BTreeSet<_> = self
+            .scenario
+            .service
+            .fleet
+            .iter()
+            .map(|vehicle| vehicle.id)
+            .chain(self.scenario.taxi.fleet.iter().map(|vehicle| vehicle.id))
+            .collect();
+        for item in self.lanes.iter().flat_map(|lane| &lane.queue) {
+            if let crate::QueueEntry::Vehicle { id, .. } = item.entry
+                && !item.managed
+                && assigned_vehicles.contains(&id)
+            {
+                return Err(EditError::VehicleInUse(id));
+            }
+        }
         let specs: BTreeMap<_, _> = self
             .scenario
             .lanes
@@ -497,16 +572,20 @@ impl Draft {
         let mut changes = RouteChanges::default();
         for lane in &mut self.lanes {
             for item in &mut lane.queue {
-                let target = item.recovery.map(|recovery| recovery.target).or_else(|| {
-                    item.route
-                        .last()
-                        .and_then(|id| destinations.get(id))
-                        .copied()
-                });
+                let target = item
+                    .blocked_destination
+                    .or(item.recovery.map(|recovery| recovery.target))
+                    .or_else(|| {
+                        item.route
+                            .last()
+                            .and_then(|id| destinations.get(id))
+                            .copied()
+                    });
                 let Some(target) = target else {
                     continue;
                 };
                 if item.recovery.is_none()
+                    && item.blocked_destination.is_none()
                     && road.supports_vehicle_route(lane.id, target, &item.entry, &item.route)
                 {
                     continue;
@@ -519,6 +598,7 @@ impl Draft {
                 {
                     item.route = replacement;
                     item.recovery = None;
+                    item.blocked_destination = None;
                     changes.rerouted += units;
                 } else if matches!(item.entry, crate::QueueEntry::PrivateCars(_)) {
                     let exit_in_progress = item
@@ -550,8 +630,11 @@ impl Draft {
                         item.recovery = Some(CarRecoveryV1 { target, exit: None });
                         changes.blocked += units;
                     }
+                } else if item.managed {
+                    item.route.clear();
+                    item.blocked_destination = Some(target);
+                    changes.blocked += units;
                 } else {
-                    // Other vehicle services still validate their routes at this boundary.
                     continue;
                 }
                 lane.wait = None;
@@ -566,12 +649,18 @@ impl Draft {
 
     fn finish(mut self, sim: &Simulation, revision: u64) -> Result<PreparedEdit, EditError> {
         self.scenario.layout.sort_tables();
-        let mut world =
-            World::from_scenario(self.scenario.clone()).map_err(|error: ValidationError| {
-                EditError::WouldInvalidate(LoadError::State(error))
-            })?;
+        let permitted = unchanged_lines(&sim.scenario.service, &self.scenario.service);
+        let mut world = World::from_scenario(self.scenario.clone(), &permitted)
+            .map_err(|error| EditError::WouldInvalidate(LoadError::State(error)))?;
         let invalid = EditError::WouldInvalidate;
         let tick = sim.traffic;
+        for line in &self.scenario.service.lines {
+            if world.service.line_disconnected(line.id)
+                != sim.world.service.line_disconnected(line.id)
+            {
+                self.affected_lines.insert(line.id);
+            }
+        }
         let changes = self.repair_routes(&sim.scenario, &world.road);
         world
             .road
@@ -579,7 +668,7 @@ impl Draft {
             .map_err(invalid)?;
         world
             .service
-            .restore(sim.world.service.snapshot(), tick, &world.road)
+            .reconcile(&sim.world.service, tick, &world.road)
             .map_err(invalid)?;
         world
             .taxi
@@ -602,6 +691,9 @@ impl Draft {
                 affected_lanes: self.affected.into_iter().collect(),
                 affected_foot_edges: self.affected_foot_edges.into_iter().collect(),
                 affected_buildings: self.affected_buildings.into_iter().collect(),
+                affected_stops: self.affected_stops.into_iter().collect(),
+                affected_lines: self.affected_lines.into_iter().collect(),
+                affected_line_vehicles: self.affected_line_vehicles.into_iter().collect(),
                 relocated_vehicles: self.relocated_vehicles,
                 rerouted_vehicles: changes.rerouted,
                 blocked_vehicles: changes.blocked,
@@ -645,4 +737,58 @@ fn empty_lane(id: LaneId) -> LaneV1 {
 
 fn space(entry: &crate::QueueEntry) -> u64 {
     u64::from(entry.units()) * u64::from(entry.unit_space())
+}
+
+fn upsert<T: Clone>(items: &mut Vec<T>, value: &T, matches: impl Fn(&T) -> bool) {
+    if let Some(previous) = items.iter_mut().find(|item| matches(item)) {
+        *previous = value.clone();
+    } else {
+        items.push(value.clone());
+    }
+}
+
+fn remove<T>(items: &mut Vec<T>, matches: impl Fn(&T) -> bool) -> Option<T> {
+    let index = items.iter().position(matches)?;
+    Some(items.remove(index))
+}
+
+fn unchanged_lines(
+    previous: &crate::ServiceSpec,
+    current: &crate::ServiceSpec,
+) -> BTreeSet<LineId> {
+    let stops = |spec: &crate::ServiceSpec| -> BTreeMap<_, _> {
+        spec.stops
+            .iter()
+            .map(|stop| (stop.id, (stop.zone, stop.lane)))
+            .collect()
+    };
+    let longest = |spec: &crate::ServiceSpec, id: LineId| {
+        spec.fleet
+            .iter()
+            .filter(|vehicle| vehicle.line == id)
+            .map(|vehicle| vehicle.length_mm)
+            .max()
+    };
+    let previous_stops = stops(previous);
+    let current_stops = stops(current);
+    current
+        .lines
+        .iter()
+        .filter(|line| {
+            previous
+                .lines
+                .iter()
+                .find(|old| old.id == line.id)
+                .is_some_and(|old| {
+                    old.kind == line.kind
+                        && old.stops == line.stops
+                        && line
+                            .stops
+                            .iter()
+                            .all(|id| previous_stops.get(id) == current_stops.get(id))
+                        && longest(previous, line.id) == longest(current, line.id)
+                })
+        })
+        .map(|line| line.id)
+        .collect()
 }

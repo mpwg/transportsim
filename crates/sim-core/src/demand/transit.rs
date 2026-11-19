@@ -175,6 +175,10 @@ impl DemandState {
 
     pub(crate) fn alighting(&mut self, events: Vec<Alighting>, tick: Tick) {
         for event in events {
+            if let Some(zone) = event.replan_at {
+                self.park_cohort(event.cohort, zone, u64::from(event.count));
+                continue;
+            }
             let part = Part {
                 cohort: event.cohort,
                 leg: event.leg + 1,
@@ -207,6 +211,12 @@ impl DemandState {
         boarding.sort_by_key(|part| part.since);
         for mut part in boarding {
             let ride = &transit_path(&self.state.cohorts, part.cohort).rides[part.leg];
+            if service.line_disconnected(ride.line)
+                && let Some(zone) = service.stop_zone(ride.board)
+            {
+                self.park_cohort(part.cohort, zone, u64::from(part.amount));
+                continue;
+            }
             let admitted = service.enter_passengers(PassengerRequest {
                 cohort: part.cohort,
                 leg: part.leg,

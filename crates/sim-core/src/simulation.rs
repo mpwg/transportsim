@@ -4,7 +4,7 @@ use crate::{
     ClockObservation, Observation, Query, QueryError, RuleSet, Scenario, Tick, ValidationError,
 };
 use crate::{EditCommand, EditError, EditPreview, edit};
-use std::{fmt, num::NonZeroU32};
+use std::{collections::BTreeSet, fmt, num::NonZeroU32};
 
 /// A mutation applied at a completed simulation boundary.
 #[non_exhaustive]
@@ -89,13 +89,22 @@ pub struct Simulation {
 impl Simulation {
     /// Validates and starts a scenario with deterministic initial conditions.
     pub fn new_game(
-        mut scenario: Scenario,
+        scenario: Scenario,
         rules: RuleSet,
         seed: u64,
     ) -> Result<Self, ValidationError> {
+        Self::new_with_disconnections(scenario, rules, seed, &BTreeSet::new())
+    }
+
+    pub(crate) fn new_with_disconnections(
+        mut scenario: Scenario,
+        rules: RuleSet,
+        seed: u64,
+        allowed_disconnected: &BTreeSet<LineId>,
+    ) -> Result<Self, ValidationError> {
         scenario.layout.sort_tables();
         let traffic = scenario.start;
-        let world = World::from_scenario(scenario.clone())?;
+        let world = World::from_scenario(scenario.clone(), allowed_disconnected)?;
         Ok(Self {
             world,
             scenario,
@@ -233,8 +242,12 @@ impl Simulation {
                     &self.world.demand,
                 )))
             }
-            Query::Service => Ok(Observation::Service(self.world.service.observe())),
-            Query::Taxi => Ok(Observation::Taxi(self.world.taxi.observe())),
+            Query::Service => Ok(Observation::Service(
+                self.world.service.observe(&self.world.road),
+            )),
+            Query::Taxi => Ok(Observation::Taxi(
+                self.world.taxi.observe(self.traffic, &self.world.road),
+            )),
             Query::Demand => Ok(Observation::Demand(
                 self.world.demand.observe(&self.world.taxi),
             )),

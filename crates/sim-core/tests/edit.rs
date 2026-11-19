@@ -523,3 +523,233 @@ fn enlarging_a_sidewalk_affects_link_discharge_and_uses_street_width() {
     };
     assert_eq!(edge.discharge.get(), 2);
 }
+
+fn service_edit(revision: u64, connect_return: bool) -> EditCommand {
+    use sim_core::{FleetSpec, LineId, LineSpec, StopId, StopSpec, ZoneId};
+
+    let mut actions: Vec<_> = [(1, 1), (2, 3)]
+        .into_iter()
+        .map(|(id, lane)| {
+            EditAction::UpsertStop(StopSpec {
+                id: StopId::new(id),
+                zone: ZoneId::new(id),
+                lane: LaneId::new(lane),
+                capacity: nz(20),
+                minimum_dwell: nz(2),
+                passengers_per_tick: nz(10),
+            })
+        })
+        .collect();
+    if connect_return {
+        actions.push(EditAction::UpsertMovement(movement(3, 3, 1)));
+    }
+    actions.extend([
+        EditAction::UpsertLine(LineSpec {
+            id: LineId::new(1),
+            kind: VehicleKind::Bus,
+            stops: vec![StopId::new(1), StopId::new(2)],
+            first_departure: Tick::new(1),
+            headway: nz(30),
+        }),
+        EditAction::UpsertLineVehicle(FleetSpec {
+            id: VehicleId::new(12),
+            line: LineId::new(1),
+            length_mm: nz(8_000),
+            capacity: nz(8),
+        }),
+    ]);
+    EditCommand {
+        expected_revision: revision,
+        actions,
+    }
+}
+
+fn bus_scenario() -> sim_core::Scenario {
+    let mut spec = commute_scenario();
+    spec.demand.profiles.clear();
+    for lane in &mut spec.lanes {
+        lane.allowed.push(VehicleKind::Bus);
+        lane.discharge.millimetres = nz(10_000);
+        lane.travel_ticks = nz(1);
+    }
+    spec
+}
+
+fn bus_network() -> Simulation {
+    Simulation::new_game(bus_scenario(), sim_core::RuleSet::default(), 42).unwrap()
+}
+
+fn lines(sim: &Simulation) -> sim_core::ServiceObservation {
+    let Observation::Service(view) = sim.inspect(Query::Service).unwrap() else {
+        panic!("service");
+    };
+    view
+}
+
+#[test]
+fn stops_line_and_deployment_can_be_built_together_but_an_unreachable_line_is_rejected() {
+    let mut sim = bus_network();
+    let before = sim.fingerprint().unwrap();
+    assert!(matches!(
+        sim.preview(&service_edit(0, false)),
+        Err(EditError::WouldInvalidate(sim_core::LoadError::State(
+            sim_core::ValidationError::Service(sim_core::ServiceError::InvalidLine(_))
+        )))
+    ));
+    assert_eq!(sim.fingerprint().unwrap(), before);
+    let edit = service_edit(0, true);
+    let preview = sim.preview(&edit).unwrap();
+    assert_eq!(preview.affected_stops.len(), 2);
+    assert_eq!(preview.affected_lines.len(), 1);
+    sim.apply(Command::CommitEdit(edit)).unwrap();
+    assert_eq!(lines(&sim).vehicles[0].id, VehicleId::new(12));
+    let mut restored = Simulation::load(&sim.save().unwrap()).unwrap();
+    restored.advance(4).unwrap();
+    assert!(matches!(lane(&restored, 2).queue.as_slice(),
+        [QueueEntry::Vehicle { id, .. }] if *id == VehicleId::new(12)));
+}
+
+#[test]
+fn interrupted_bus_keeps_its_place_and_gets_back_to_its_next_stop_after_reopening() {
+    let mut sim = bus_network();
+    sim.apply(Command::CommitEdit(service_edit(0, true)))
+        .unwrap();
+    sim.advance(4).unwrap();
+    let receipt = sim
+        .apply(Command::CommitEdit(EditCommand {
+            expected_revision: 1,
+            actions: vec![EditAction::RemoveMovement(MovementId::new(2))],
+        }))
+        .unwrap();
+    let preview = receipt.edit.unwrap();
+    assert_eq!(preview.blocked_vehicles, 1);
+    assert_eq!(preview.affected_lines, [sim_core::LineId::new(1)]);
+    sim.advance(2).unwrap();
+    assert!(lines(&sim).lines[0].disconnected);
+    assert!(lines(&sim).vehicles[0].disconnected);
+    assert_eq!(lane(&sim, 2).wait_reason, Some(WaitReason::Disconnected));
+    let mut restored = Simulation::load(&sim.save().unwrap()).unwrap();
+    assert_eq!(lines(&restored), lines(&sim));
+    restored
+        .apply(Command::CommitEdit(EditCommand {
+            expected_revision: 2,
+            actions: vec![EditAction::UpsertMovement(movement(2, 2, 3))],
+        }))
+        .unwrap();
+    restored.advance(1).unwrap();
+    assert!(!lines(&restored).lines[0].disconnected);
+    assert!(!lines(&restored).vehicles[0].disconnected);
+    assert!(matches!(lane(&restored, 3).queue.as_slice(),
+        [QueueEntry::Vehicle { id, .. }] if *id == VehicleId::new(12)));
+}
+
+#[test]
+fn stranded_bus_passengers_can_replan_from_its_actual_stop() {
+    use sim_core::{DemandProfile, FootEdgeId, FootEdgeSpec, TripPurpose, ZoneId};
+    let mut spec = bus_scenario();
+    spec.demand.car_weight = 0;
+    spec.demand.zones[0].residents = 2;
+    spec.demand.zones[1].jobs = 2;
+    spec.demand.profiles.push(DemandProfile {
+        purpose: TripPurpose::Work,
+        departure_offsets: vec![0],
+        return_offset: 100,
+        rate_numerator: 1,
+        rate_denominator: nz(1),
+    });
+    let mut sim = Simulation::new_game(spec, sim_core::RuleSet::default(), 42).unwrap();
+    let mut edit = service_edit(0, true);
+    for action in &mut edit.actions {
+        if let EditAction::UpsertLineVehicle(vehicle) = action {
+            vehicle.capacity = nz(1);
+        }
+    }
+    sim.apply(Command::CommitEdit(edit)).unwrap();
+    sim.advance(3).unwrap();
+    assert_eq!(lines(&sim).vehicles[0].onboard, 1);
+    assert_eq!(lines(&sim).stops[0].waiting_total, 1);
+    let from = ZoneId::new(1);
+    let to = ZoneId::new(2);
+    sim.apply(Command::CommitEdit(EditCommand {
+        expected_revision: 1,
+        actions: vec![
+            EditAction::RemoveMovement(MovementId::new(1)),
+            EditAction::UpsertFootEdge(FootEdgeSpec {
+                id: FootEdgeId::new(1),
+                from,
+                to,
+                travel_ticks: nz(2),
+                capacity: nz(8),
+                discharge: nz(8),
+                signal: None,
+            }),
+        ],
+    }))
+    .unwrap();
+    let mut loaded = Simulation::load(&sim.save().unwrap()).unwrap();
+    loaded.advance(1).unwrap();
+    assert_eq!(lines(&loaded).vehicles[0].onboard, 0);
+    assert!(lines(&loaded).vehicles[0].disconnected);
+    assert_eq!(demand(&loaded).active[0].location, from);
+    assert_eq!(demand(&loaded).waiting, 2);
+    loaded.advance(3).unwrap();
+    let state = demand(&loaded);
+    assert_eq!(
+        (state.generated, state.arrived, state.total_travel_ticks),
+        (2, 2, 12)
+    );
+    assert_eq!(lane(&loaded, 1).occupied_mm, 8_000);
+}
+
+#[test]
+fn line_deployment_cannot_reuse_an_individual_vehicle_already_on_the_road() {
+    use sim_core::TrafficSeed;
+    let mut spec = bus_scenario();
+    spec.traffic.push(TrafficSeed {
+        lane: LaneId::new(1),
+        entry: QueueEntry::Vehicle {
+            id: VehicleId::new(12),
+            kind: VehicleKind::Bus,
+            length_mm: nz(8000),
+        },
+        ready_at: Tick::new(10),
+        route: vec![MovementId::new(1)],
+    });
+    let sim = Simulation::new_game(spec, sim_core::RuleSet::default(), 42).unwrap();
+    assert!(
+        matches!(sim.preview(&service_edit(0, true)), Err(EditError::VehicleInUse(id))
+        if id == VehicleId::new(12))
+    );
+}
+
+#[test]
+fn a_line_vehicle_can_be_removed_when_idle_and_an_active_one_keeps_its_place() {
+    use sim_core::{LineId, StopId};
+    let remove_line = EditCommand {
+        expected_revision: 1,
+        actions: vec![
+            EditAction::RemoveLineVehicle(VehicleId::new(12)),
+            EditAction::RemoveLine(LineId::new(1)),
+            EditAction::RemoveStop(StopId::new(1)),
+            EditAction::RemoveStop(StopId::new(2)),
+        ],
+    };
+    let mut idle = bus_network();
+    idle.apply(Command::CommitEdit(service_edit(0, true)))
+        .unwrap();
+    idle.apply(Command::CommitEdit(remove_line.clone()))
+        .unwrap();
+    assert!(lines(&idle).lines.is_empty());
+    assert!(lines(&idle).vehicles.is_empty());
+    assert!(lines(&idle).stops.is_empty());
+
+    let mut running = bus_network();
+    running
+        .apply(Command::CommitEdit(service_edit(0, true)))
+        .unwrap();
+    running.advance(3).unwrap();
+    let before = running.fingerprint().unwrap();
+    assert!(running.apply(Command::CommitEdit(remove_line)).is_err());
+    assert_eq!(running.fingerprint().unwrap(), before);
+    assert_eq!(lane(&running, 1).occupied_mm, 8000);
+}

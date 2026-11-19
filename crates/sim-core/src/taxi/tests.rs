@@ -91,7 +91,7 @@ fn dispatch_breaks_a_tie_by_vehicle_id() {
         Some((2, 3))
     );
     assert!(step(1, &mut taxi, &mut road).is_empty());
-    let vehicles = taxi.observe().vehicles;
+    let vehicles = taxi.observe(Tick::new(1), &road).vehicles;
     assert_eq!(vehicles[0].id, VehicleId::new(7));
     assert!(matches!(vehicles[0].status, TaxiStatus::ToPickup { .. }));
     assert!(matches!(vehicles[1].status, TaxiStatus::Idle { .. }));
@@ -111,7 +111,7 @@ fn dispatch_skips_unreachable_requests_and_bundles_up_to_capacity() {
     taxi.request(request(9, 2, 1, 2, 1));
     taxi.request(request(6, 2, 3, 2, 1));
     assert!(step(2, &mut taxi, &mut road).is_empty());
-    let observation = taxi.observe();
+    let observation = taxi.observe(Tick::new(2), &road);
     assert_eq!(observation.waiting_total, 5);
     assert_eq!(observation.unassigned_total, 3);
     assert!(
@@ -119,9 +119,10 @@ fn dispatch_skips_unreachable_requests_and_bundles_up_to_capacity() {
     );
     assert!(step(3, &mut taxi, &mut road).is_empty());
     assert!(step(4, &mut taxi, &mut road).is_empty());
-    assert_eq!(taxi.observe().waiting_total, 3);
+    let observation = taxi.observe(Tick::new(4), &road);
+    assert_eq!(observation.waiting_total, 3);
     assert!(matches!(
-        taxi.observe().vehicles[0].status,
+        observation.vehicles[0].status,
         TaxiStatus::Occupied { .. }
     ));
     assert!(step(5, &mut taxi, &mut road).is_empty());
@@ -141,10 +142,10 @@ fn congestion_delays_pickup_and_arrival() {
     taxi.request(request(1, 2, 3, 1, 1));
     for tick in 1..=6 {
         assert!(step(tick, &mut taxi, &mut road).is_empty());
-        assert_eq!(taxi.observe().waiting_total, 1);
+        assert_eq!(taxi.observe(Tick::new(tick), &road).waiting_total, 1);
     }
     assert!(step(7, &mut taxi, &mut road).is_empty());
-    assert_eq!(taxi.observe().waiting_total, 0);
+    assert_eq!(taxi.observe(Tick::new(7), &road).waiting_total, 0);
     assert!(step(8, &mut taxi, &mut road).is_empty());
     assert!(step(9, &mut taxi, &mut road).is_empty());
     assert_eq!(step(10, &mut taxi, &mut road), vec![(1, 1)]);
@@ -170,7 +171,11 @@ fn checkpoint_continues_both_phases_without_changing_arrivals() {
             .restore(serde_json::from_slice(&wire).unwrap(), tick, &restored_road)
             .unwrap();
         for tick in saved_at + 1..=20 {
-            assert_eq!(original.observe(), restored.observe());
+            let observed_at = Tick::new(tick - 1);
+            assert_eq!(
+                original.observe(observed_at, &original_road),
+                restored.observe(observed_at, &restored_road)
+            );
             assert_eq!(
                 step(tick, &mut original, &mut original_road),
                 step(tick, &mut restored, &mut restored_road)
@@ -207,7 +212,7 @@ fn at_pickup_the_taxi_starts_the_occupied_trip_without_an_empty_leg() {
     taxi.request(request(1, 2, 3, 1, 1));
     assert!(step(1, &mut taxi, &mut road).is_empty());
     assert!(matches!(
-        taxi.observe().vehicles[0].status,
+        taxi.observe(Tick::new(1), &road).vehicles[0].status,
         TaxiStatus::Occupied { .. }
     ));
     assert_eq!(taxi.waiting_cohorts().count(), 0);
@@ -240,7 +245,7 @@ fn future_request_is_not_reserved_with_a_current_one() {
     taxi.request(request(2, 2, 3, 9, 1));
     step(1, &mut taxi, &mut road);
     assert!(
-        matches!(taxi.observe().vehicles[0].status, TaxiStatus::ToPickup { assignment } if assignment.passengers == 1)
+        matches!(taxi.observe(Tick::new(1), &road).vehicles[0].status, TaxiStatus::ToPickup { assignment } if assignment.passengers == 1)
     );
 }
 
@@ -252,7 +257,10 @@ fn checkpoint_accepts_multiple_chunks_of_the_same_cohort() {
     taxi.request(request(1, 2, 3, 1, u32::MAX));
     taxi.request(request(1, 2, 3, 1, 2));
     step(1, &mut taxi, &mut road);
-    assert_eq!(taxi.observe().waiting_total, u64::from(u32::MAX) + 2);
+    assert_eq!(
+        taxi.observe(Tick::new(1), &road).waiting_total,
+        u64::from(u32::MAX) + 2
+    );
     taxi.restore(taxi.snapshot(), Tick::new(1), &road).unwrap();
 }
 

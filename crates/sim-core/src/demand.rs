@@ -554,7 +554,7 @@ impl DemandState {
             .state
             .cohorts
             .get_mut(&id)
-            .expect("car exit has a journey cohort");
+            .expect("parked travelers have a journey cohort");
         original.in_transit -= amount;
         let parked = Cohort {
             resume_from: Some(zone),
@@ -1053,7 +1053,7 @@ impl DemandState {
                     JourneyPath::CarWaiting => self.spec.car_weight != 0,
 
                     JourneyPath::Taxi => {
-                        self.spec.taxi_weight != 0 && taxi.can_carry(cohort.origin, to, road)
+                        self.spec.taxi_weight != 0 && taxi.has_access_pair(cohort.origin, to)
                     }
                     JourneyPath::Transit(path) => {
                         self.spec.transit_weight != 0

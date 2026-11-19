@@ -112,6 +112,7 @@ struct QueueItem {
     cohort: Option<u64>,
     managed: bool,
     recovery: Option<CarRecoveryV1>,
+    blocked_destination: Option<LaneId>,
 }
 
 #[derive(Debug)]
@@ -249,6 +250,7 @@ impl RoadState {
             cohort: Some(cohort),
             managed: false,
             recovery: None,
+            blocked_destination: None,
         };
         self.push_queue_item(from, item)
             .map_or(0, |()| admitted.get())
@@ -279,14 +281,28 @@ impl RoadState {
             cohort: None,
             managed: true,
             recovery: None,
+            blocked_destination: None,
         };
         self.push_queue_item(from, item).is_ok()
     }
 
     pub(crate) fn vehicle_at_stop(&self, id: VehicleId, tick: Tick) -> Option<LaneId> {
+        self.managed_head_at_stop(id, tick, false)
+    }
+
+    pub(crate) fn managed_vehicle_blocked_at_stop(
+        &self,
+        id: VehicleId,
+        tick: Tick,
+    ) -> Option<LaneId> {
+        self.managed_head_at_stop(id, tick, true)
+    }
+
+    fn managed_head_at_stop(&self, id: VehicleId, tick: Tick, blocked: bool) -> Option<LaneId> {
         self.lanes.iter().find_map(|(&lane_id, lane)| {
             let head = lane.queue.front()?;
             (head.managed
+                && head.blocked_destination.is_some() == blocked
                 && head.route.is_empty()
                 && head.ready_at.is_some_and(|ready| ready <= tick)
                 && head.entry.vehicle_id() == Some(id))
@@ -373,6 +389,17 @@ impl RoadState {
         self.lanes.contains_key(&id)
     }
 
+    pub(crate) fn managed_vehicle_blocked(&self, vehicle: VehicleId) -> bool {
+        self.lanes
+            .values()
+            .flat_map(|lane| &lane.queue)
+            .any(|item| {
+                item.managed
+                    && item.blocked_destination.is_some()
+                    && item.entry.vehicle_id() == Some(vehicle)
+            })
+    }
+
     pub(crate) fn managed_vehicle_endpoint(
         &self,
         vehicle: VehicleId,
@@ -383,7 +410,9 @@ impl RoadState {
                     return None;
                 };
                 (item.managed && id == vehicle).then(|| {
-                    let endpoint = item.route.back().map_or(lane, |id| self.movements[id].to);
+                    let endpoint = item.blocked_destination.unwrap_or_else(|| {
+                        item.route.back().map_or(lane, |id| self.movements[id].to)
+                    });
                     (endpoint, length_mm)
                 })
             })
@@ -528,6 +557,7 @@ impl RoadState {
                 cohort: None,
                 managed: false,
                 recovery: None,
+                blocked_destination: None,
             },
         )
     }
@@ -636,6 +666,7 @@ impl RoadState {
                         cohort: item.cohort,
                         managed: item.managed,
                         recovery: item.recovery,
+                        blocked_destination: item.blocked_destination,
                     })
                     .collect(),
             })
@@ -723,6 +754,13 @@ impl RoadState {
                         field: "lanes.queue.ready_at",
                     });
                 }
+                if item.blocked_destination.is_some_and(|destination| {
+                    !item.managed || !item.route.is_empty() || destination == saved.id
+                }) {
+                    return Err(LoadError::InvalidState {
+                        field: "lanes.queue.blocked_destination",
+                    });
+                }
                 if let Some(recovery) = item.recovery
                     && (!matches!(item.entry, QueueEntry::PrivateCars(_))
                         || (recovery.exit.is_none() && !item.route.is_empty()))
@@ -754,6 +792,7 @@ impl RoadState {
                         cohort: item.cohort,
                         managed: item.managed,
                         recovery: item.recovery,
+                        blocked_destination: item.blocked_destination,
                     },
                 )
                 .map_err(road_error)?;
@@ -818,6 +857,10 @@ impl RoadState {
             };
             if head.ready_at.is_none_or(|ready| ready > tick) {
                 lane.wait = Some(WaitReason::TravelTime);
+                continue;
+            }
+            if head.blocked_destination.is_some() {
+                lane.wait = Some(WaitReason::Disconnected);
                 continue;
             }
             if head
@@ -945,6 +988,7 @@ impl RoadState {
                     cohort: head.cohort,
                     managed: false,
                     recovery: head.recovery,
+                    blocked_destination: head.blocked_destination,
                 });
             }
             if let Some(to) = movement.to {
@@ -958,6 +1002,7 @@ impl RoadState {
                     cohort: head.cohort,
                     managed: head.managed,
                     recovery: head.recovery,
+                    blocked_destination: head.blocked_destination,
                 });
             } else if let Some(cohort) = head.cohort {
                 let units = movement.units.get();

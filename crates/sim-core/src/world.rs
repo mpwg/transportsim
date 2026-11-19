@@ -4,7 +4,7 @@ use crate::{
 };
 use crate::{DemandError, DemandSpec, demand::DemandState, traffic::RoadState};
 use crate::{LayoutError, LayoutSpec};
-use crate::{QueueEntry, ServiceError, ServiceSpec, service::Service};
+use crate::{LineId, QueueEntry, ServiceError, ServiceSpec, service::Service};
 use std::{collections::BTreeSet, fmt, num::NonZeroU64};
 
 /// Initial conditions supplied by a scenario author.
@@ -106,7 +106,10 @@ pub(crate) struct World {
 }
 
 impl World {
-    pub(crate) fn from_scenario(scenario: Scenario) -> Result<Self, ValidationError> {
+    pub(crate) fn from_scenario(
+        scenario: Scenario,
+        allowed_disconnected: &BTreeSet<LineId>,
+    ) -> Result<Self, ValidationError> {
         let mut buildings = BTreeSet::new();
         for (index, id) in scenario.building_ids.into_iter().enumerate() {
             if !buildings.insert(id) {
@@ -152,11 +155,12 @@ impl World {
             .iter()
             .map(|vehicle| vehicle.id)
             .collect();
-        let service = Service::new(
+        let service = Service::new_with_disconnections(
             scenario.service,
             &road,
             |id| demand.contains_zone(id),
             |id| seeded_vehicles.contains(&id),
+            allowed_disconnected,
         )
         .map_err(ValidationError::Service)?;
         let taxi = Taxi::new(scenario.taxi, demand.road_accesses(), &road, |id| {

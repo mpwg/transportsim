@@ -1,4 +1,9 @@
-use std::{borrow::Cow, collections::BTreeMap, fmt, num::NonZeroU32};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    num::NonZeroU32,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -57,7 +62,7 @@ pub struct LineSpec {
     pub first_departure: Tick,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FleetSpec {
     pub id: VehicleId,
@@ -137,7 +142,17 @@ fn is_zero(value: &u64) -> bool {
 struct Line {
     spec: LineSpec,
     // Each route starts at the corresponding stop. The last is the empty run back.
-    routes: Vec<Vec<MovementId>>,
+    routes: Vec<Option<Vec<MovementId>>>,
+}
+
+impl Line {
+    fn reachable_stops_after(&self, index: usize) -> &[StopId] {
+        let end = self.routes[index..self.spec.stops.len() - 1]
+            .iter()
+            .position(Option::is_none)
+            .map_or(self.spec.stops.len(), |offset| index + 1 + offset);
+        &self.spec.stops[index + 1..end]
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -167,6 +182,12 @@ impl LineStatus {
                 (change.anchor, change.ticks)
             })
     }
+
+    fn record_departure(&mut self, planned: Tick, tick: Tick) {
+        self.departed += 1;
+        self.last_departure = Some(tick);
+        self.last_delay = Some(tick.seconds() - planned.seconds());
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -174,10 +195,18 @@ impl LineStatus {
 pub(crate) struct ServiceSnapshot {
     lines: BTreeMap<LineId, LineStatus>,
     vehicles: BTreeMap<VehicleId, Progress>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    disconnected_lines: BTreeSet<LineId>,
     #[serde(default)]
     released: BTreeMap<VehicleId, Tick>,
     #[serde(default, skip_serializing_if = "PassengerState::is_empty")]
     passengers: PassengerState,
+}
+
+impl ServiceSnapshot {
+    pub(crate) fn disconnected_lines(&self) -> &BTreeSet<LineId> {
+        &self.disconnected_lines
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -211,6 +240,7 @@ pub struct TimetableObservation {
 #[non_exhaustive]
 pub struct LineObservation {
     pub id: LineId,
+    pub disconnected: bool,
     pub headway: u32,
     pub pending: Option<Tick>,
     pub departed: u64,
@@ -224,6 +254,7 @@ pub struct LineObservation {
 pub struct ServiceVehicleObservation {
     pub id: VehicleId,
     pub line: LineId,
+    pub disconnected: bool,
     pub kind: VehicleKind,
     pub capacity: u32,
     pub onboard: u32,
@@ -242,11 +273,22 @@ pub(crate) struct Service {
 }
 
 impl Service {
+    #[cfg(test)]
     pub(crate) fn new(
         spec: ServiceSpec,
         road: &RoadState,
         zone_exists: impl Fn(ZoneId) -> bool,
         vehicle_used: impl Fn(VehicleId) -> bool,
+    ) -> Result<Self, ServiceError> {
+        Self::new_with_disconnections(spec, road, zone_exists, vehicle_used, &BTreeSet::new())
+    }
+
+    pub(crate) fn new_with_disconnections(
+        spec: ServiceSpec,
+        road: &RoadState,
+        zone_exists: impl Fn(ZoneId) -> bool,
+        vehicle_used: impl Fn(VehicleId) -> bool,
+        allowed: &BTreeSet<LineId>,
     ) -> Result<Self, ServiceError> {
         let mut stops = BTreeMap::new();
         for stop in spec.stops {
@@ -291,13 +333,17 @@ impl Service {
                 } else {
                     road.route_for(line.kind, from.lane, to.lane)
                 };
-                let Some((cost, route)) = path else {
+                if let Some((cost, route)) = path {
+                    leg_costs.push(cost - u64::from(road.lane_travel_ticks(from.lane).unwrap()));
+                    routes.push(Some(route));
+                } else if allowed.contains(&id) {
+                    current.disconnected_lines.insert(id);
+                    routes.push(None);
+                } else {
                     return Err(ServiceError::InvalidLine(id));
-                };
-                leg_costs.push(cost - u64::from(road.lane_travel_ticks(from.lane).unwrap()));
-                routes.push(route);
+                }
             }
-            if largest.is_some() {
+            if largest.is_some() && !current.disconnected_lines.contains(&id) {
                 links.extend(timetable(&line, &stops, &leg_costs, road));
             }
             if lines.insert(id, Line { spec: line, routes }).is_some() {
@@ -325,14 +371,100 @@ impl Service {
         })
     }
 
+    pub(crate) fn reconcile(
+        &mut self,
+        previous: &Self,
+        tick: Tick,
+        road: &RoadState,
+    ) -> Result<(), LoadError> {
+        let mut snapshot = self.current.clone();
+        for (&id, status) in &mut snapshot.lines {
+            let Some(&prior) = previous.current.lines.get(&id) else {
+                continue;
+            };
+            *status = prior;
+            let old = &previous.lines[&id].spec;
+            let new = &self.lines[&id].spec;
+            if old.headway != new.headway || old.first_departure != new.first_departure {
+                let anchor = tick
+                    .seconds()
+                    .checked_sub(new.first_departure.seconds())
+                    .map_or(Some(new.first_departure), |elapsed| {
+                        let interval = u64::from(new.headway.get());
+                        tick.seconds()
+                            .checked_add(interval - elapsed % interval)
+                            .map(Tick::new)
+                    });
+                status.headway = Some(HeadwayChange {
+                    ticks: new.headway,
+                    anchor,
+                });
+            }
+        }
+        for (&id, &phase) in &previous.current.vehicles {
+            if phase == Progress::Idle {
+                continue;
+            }
+            let invalid = LoadError::InvalidState {
+                field: "service.active_vehicle",
+            };
+            let old = &previous.fleet[&id];
+            if self.fleet.get(&id) != Some(old) {
+                return Err(invalid);
+            }
+            let before = &previous.lines[&old.line].spec;
+            let after = &self.lines[&old.line].spec;
+            if before.kind != after.kind
+                || before.stops != after.stops
+                || before.stops.iter().any(|stop| {
+                    let old = &previous.stops[stop];
+                    let new = &self.stops[stop];
+                    (old.lane, old.zone) != (new.lane, new.zone)
+                })
+            {
+                return Err(invalid);
+            }
+            snapshot.vehicles.insert(id, phase);
+        }
+        snapshot.released = previous.current.released.clone();
+        if !snapshot.released.is_empty() {
+            for (id, lane, _) in road.managed_vehicles() {
+                if let Some(&planned) = snapshot.released.get(&id) {
+                    let line = self.fleet[&id].line;
+                    let origin = self.lines[&line].spec.stops[0];
+                    if lane != self.stops[&origin].lane {
+                        snapshot.released.remove(&id);
+                        snapshot
+                            .lines
+                            .get_mut(&line)
+                            .unwrap()
+                            .record_departure(planned, tick);
+                    }
+                }
+            }
+        }
+        snapshot.passengers = previous.current.passengers.clone();
+        self.restore(Some(snapshot), tick, road)
+    }
+
     pub(crate) fn enter_passengers(&mut self, request: PassengerRequest) -> u32 {
         let Some(stop) = self.stops.get(&request.board) else {
             return 0;
         };
-        if !passengers::serves(&self.lines, &request) {
+        if self.line_disconnected(request.line)
+            || !passengers::serves(&self.lines, request.line, request.board, request.alight)
+        {
             return 0;
         }
         self.current.passengers.enter(request, stop.capacity.get())
+    }
+
+    pub(crate) fn line_disconnected(&self, id: LineId) -> bool {
+        self.current.disconnected_lines.contains(&id)
+    }
+
+    pub(crate) fn stop_zone(&self, id: StopId) -> Option<ZoneId> {
+        self.stops.get(&id).map(|stop| stop.zone)
     }
 
     pub(crate) fn set_headway(&mut self, id: LineId, tick: Tick, ticks: NonZeroU32) -> bool {
@@ -356,34 +488,73 @@ impl Service {
 
     pub(crate) fn arrive_at_stops(&mut self, tick: Tick, road: &RoadState) -> Vec<Alighting> {
         let mut alighting = Vec::new();
+        self.current.passengers.release_disconnected_waiters(
+            &self.current.disconnected_lines,
+            &self.stops,
+            &mut alighting,
+        );
         for (&id, phase) in &mut self.current.vehicles {
-            let Progress::Approaching {
-                planned,
-                stop_index,
-            } = *phase
-            else {
-                continue;
+            let (planned, stop_index, dwelling) = match *phase {
+                Progress::Approaching {
+                    planned,
+                    stop_index,
+                } => (planned, stop_index, None),
+                Progress::Dwelling {
+                    planned,
+                    stop_index,
+                    until,
+                    exchanged,
+                } => (planned, stop_index, Some((until, exchanged))),
+                Progress::Idle | Progress::Returning => continue,
             };
-            let stops = &self.lines[&self.fleet[&id].line].spec.stops;
-            let stop = &self.stops[&stops[stop_index]];
-            if road.vehicle_at_stop(id, tick) != Some(stop.lane) {
+            let line = &self.lines[&self.fleet[&id].line];
+            let stop = &self.stops[&line.spec.stops[stop_index]];
+            let replan_at = line.routes[stop_index].is_none().then_some(stop.zone);
+            if dwelling.is_some() && replan_at.is_none() {
                 continue;
             }
-            let exchanged = u64::from(self.current.passengers.alight(
+            if road.vehicle_at_stop(id, tick) != Some(stop.lane) {
+                if dwelling.is_none()
+                    && self.current.passengers.onboard_total(id) != 0
+                    && let Some(lane) = road.managed_vehicle_blocked_at_stop(id, tick)
+                    && let Some(halt) = stop_index
+                        .checked_sub(1)
+                        .map(|index| &self.stops[&line.spec.stops[index]])
+                        .filter(|stop| stop.lane == lane)
+                        .or_else(|| self.stops.values().find(|stop| stop.lane == lane))
+                {
+                    self.current
+                        .passengers
+                        .alight(id, None, Some(halt.zone), &mut alighting);
+                }
+                continue;
+            }
+            let alighted = u64::from(self.current.passengers.alight(
                 id,
-                stop_index,
+                Some(stop_index),
+                replan_at,
                 &mut alighting,
             ));
-            let until = Tick::new(tick.seconds().saturating_add(
-                u64::from(stop.minimum_dwell.get())
-                    + exchanged.div_ceil(u64::from(stop.passengers_per_tick.get())),
-            ));
-            *phase = Progress::Dwelling {
-                planned,
-                stop_index,
-                until,
-                exchanged,
-            };
+            let rate = u64::from(stop.passengers_per_tick.get());
+            match dwelling {
+                None => {
+                    let until = Tick::new(tick.seconds().saturating_add(
+                        u64::from(stop.minimum_dwell.get()) + alighted.div_ceil(rate),
+                    ));
+                    *phase = Progress::Dwelling {
+                        planned,
+                        stop_index,
+                        until,
+                        exchanged: alighted,
+                    };
+                }
+                Some((until, exchanged)) if alighted != 0 => {
+                    *phase = dwelling_after_exchange(
+                        tick, planned, stop_index, until, exchanged, alighted, rate,
+                    );
+                }
+                Some(_) => {}
+            }
         }
         alighting
     }
@@ -410,7 +581,9 @@ impl Service {
             let line_state = self.current.lines.get_mut(&vehicle.line).unwrap();
             match *phase {
                 Progress::Idle => {
-                    if let Some(planned) = line_state.pending {
+                    if let Some(planned) = line_state.pending
+                        && !self.current.disconnected_lines.contains(&vehicle.line)
+                    {
                         let first = &self.stops[&line.spec.stops[0]];
                         let entry = QueueEntry::Vehicle {
                             id,
@@ -433,34 +606,25 @@ impl Service {
                     until,
                     exchanged,
                 } => {
+                    let Some(route) = &line.routes[stop_index] else {
+                        continue;
+                    };
                     let boarded = u64::from(
                         self.current
                             .passengers
-                            .board(vehicle, &line.spec, stop_index, tick),
+                            .board(vehicle, line, stop_index, tick),
                     );
                     if boarded != 0 {
                         let stop = &self.stops[&line.spec.stops[stop_index]];
                         let rate = u64::from(stop.passengers_per_tick.get());
-                        let total = exchanged + boarded;
-                        let additional = total.div_ceil(rate) - exchanged.div_ceil(rate);
-                        let until = Tick::new(
-                            until
-                                .seconds()
-                                .saturating_add(additional)
-                                .max(tick.seconds().saturating_add(boarded.div_ceil(rate))),
+                        *phase = dwelling_after_exchange(
+                            tick, planned, stop_index, until, exchanged, boarded, rate,
                         );
-                        *phase = Progress::Dwelling {
-                            planned,
-                            stop_index,
-                            until,
-                            exchanged: total,
-                        };
                         continue;
                     }
                     if tick < until {
                         continue;
                     }
-                    let route = &line.routes[stop_index];
                     let finishing = stop_index + 1 == line.spec.stops.len();
                     let moved = if finishing && route.is_empty() {
                         road.park_vehicle(id, tick)
@@ -503,9 +667,7 @@ impl Service {
                 return true;
             }
             let state = self.current.lines.get_mut(&line_id).unwrap();
-            state.departed += 1;
-            state.last_departure = Some(tick);
-            state.last_delay = Some(tick.seconds() - planned.seconds());
+            state.record_departure(*planned, tick);
             false
         });
     }
@@ -583,15 +745,13 @@ impl Service {
             return false;
         }
         for ride in &path.rides {
-            let Some(link) = self.links.iter().find(|link| {
-                (link.line, link.board, link.alight) == (ride.line, ride.board, ride.alight)
-            }) else {
-                return false;
-            };
-            if !walk(zone, link.from, foot) {
+            if !passengers::serves(&self.lines, ride.line, ride.board, ride.alight) {
                 return false;
             }
-            zone = link.to;
+            if !walk(zone, self.stops[&ride.board].zone, foot) {
+                return false;
+            }
+            zone = self.stops[&ride.alight].zone;
             foot = &ride.transfer_after;
         }
         foot.is_empty() && walk(zone, destination, &path.egress)
@@ -607,7 +767,7 @@ impl Service {
         self.current.passengers.rides(&self.fleet, &self.lines)
     }
 
-    pub(crate) fn observe(&self) -> ServiceObservation {
+    pub(crate) fn observe(&self, road: &RoadState) -> ServiceObservation {
         ServiceObservation {
             stops: self
                 .stops
@@ -620,6 +780,7 @@ impl Service {
                 .iter()
                 .map(|(&id, status)| LineObservation {
                     id,
+                    disconnected: self.line_disconnected(id),
                     headway: status.schedule(&self.lines[&id].spec).1.get(),
                     pending: status.pending,
                     departed: status.departed,
@@ -634,7 +795,8 @@ impl Service {
                 .iter()
                 .map(|(&id, phase)| {
                     let line = self.fleet[&id].line;
-                    let spec = &self.lines[&line].spec;
+                    let service = &self.lines[&line];
+                    let spec = &service.spec;
                     let (planned_departure, next_stop, dwell_until) = match *phase {
                         Progress::Idle => (None, None, None),
                         Progress::Returning => (None, Some(spec.stops[0]), None),
@@ -652,6 +814,15 @@ impl Service {
                     ServiceVehicleObservation {
                         id,
                         line,
+                        disconnected: match *phase {
+                            Progress::Idle => self.line_disconnected(line),
+                            Progress::Dwelling { stop_index, .. } => {
+                                service.routes[stop_index].is_none()
+                            }
+                            Progress::Approaching { .. } | Progress::Returning => {
+                                road.managed_vehicle_blocked(id)
+                            }
+                        },
                         kind: spec.kind,
                         capacity: self.fleet[&id].capacity.get(),
                         onboard: self.current.passengers.onboard_total(id),
@@ -689,6 +860,9 @@ impl Service {
             || !snapshot.vehicles.keys().eq(self.fleet.keys())
         {
             return Err(invalid("service.ids"));
+        }
+        if snapshot.disconnected_lines != self.current.disconnected_lines {
+            return Err(invalid("service.disconnected_lines"));
         }
         if snapshot.lines.values().any(|status| {
             [status.last_order, status.pending, status.last_departure]
@@ -729,30 +903,37 @@ impl Service {
             if kind != line.kind {
                 return Err(invalid("service.vehicle_kind"));
             }
-            match phase {
+            let target_index = match phase {
                 Progress::Approaching {
                     planned,
                     stop_index,
-                } if planned > tick || stop_index >= line.stops.len() => {
-                    return Err(invalid("service.vehicle_progress"));
-                }
+                } if planned <= tick => stop_index,
                 Progress::Dwelling {
                     planned,
                     stop_index,
                     until,
                     exchanged,
-                } if planned > tick
-                    || until < planned
-                    || exchanged > 2 * u64::from(vehicle.capacity.get())
-                    || line
-                        .stops
-                        .get(stop_index)
-                        .is_none_or(|stop| self.stops[stop].lane != lane)
-                    || road.vehicle_at_stop(id, tick) != Some(lane) =>
+                } if planned <= tick
+                    && until >= planned
+                    && u128::from(exchanged)
+                        <= (u128::from(tick.seconds() - planned.seconds()) + 1)
+                            * 2
+                            * u128::from(vehicle.capacity.get())
+                    && road.vehicle_at_stop(id, tick) == Some(lane) =>
                 {
-                    return Err(invalid("service.vehicle_progress"));
+                    stop_index
                 }
-                _ => {}
+                Progress::Returning => 0,
+                _ => return Err(invalid("service.vehicle_progress")),
+            };
+            let target = line
+                .stops
+                .get(target_index)
+                .ok_or(invalid("service.vehicle_progress"))?;
+            if road.managed_vehicle_endpoint(id)
+                != Some((self.stops[target].lane, vehicle.length_mm))
+            {
+                return Err(invalid("service.vehicle_position"));
             }
         }
         if !managed.is_empty() {
@@ -767,6 +948,31 @@ impl Service {
         )?;
         self.current = snapshot;
         Ok(())
+    }
+}
+
+fn dwelling_after_exchange(
+    tick: Tick,
+    planned: Tick,
+    stop_index: usize,
+    until: Tick,
+    exchanged: u64,
+    count: u64,
+    rate: u64,
+) -> Progress {
+    let total = exchanged.saturating_add(count);
+    let additional = total.div_ceil(rate) - exchanged.div_ceil(rate);
+    let until = Tick::new(
+        until
+            .seconds()
+            .saturating_add(additional)
+            .max(tick.seconds().saturating_add(count.div_ceil(rate))),
+    );
+    Progress::Dwelling {
+        planned,
+        stop_index,
+        until,
+        exchanged: total,
     }
 }
 
@@ -817,7 +1023,7 @@ mod tests {
         NonZeroU32::new(n).unwrap()
     }
 
-    fn setup() -> (Service, RoadState) {
+    fn road_without_leg(removed_from: Option<u64>) -> RoadState {
         let lanes = [1, 2, 3]
             .map(|id| LaneSpec {
                 id: LaneId::new(id),
@@ -832,6 +1038,8 @@ mod tests {
             .to_vec();
         let junction = JunctionId::new(1);
         let movements = [(1, 2), (2, 3), (3, 1)]
+            .into_iter()
+            .filter(|&(from, _)| Some(from) != removed_from)
             .map(|(from, to)| MovementSpec {
                 id: MovementId::new(from),
                 from: LaneId::new(from),
@@ -840,8 +1048,8 @@ mod tests {
                 conflict_zones: vec![1],
                 priority: 0,
             })
-            .to_vec();
-        let mut road = RoadState::new(
+            .collect();
+        RoadState::new(
             lanes,
             movements,
             vec![JunctionSpec {
@@ -850,7 +1058,10 @@ mod tests {
             }],
             vec![],
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    fn spec() -> ServiceSpec {
         let stops = [1, 2, 3]
             .map(|id| StopSpec {
                 id: StopId::new(id),
@@ -868,22 +1079,21 @@ mod tests {
             headway: nonzero(20),
             first_departure: Tick::new(1),
         };
-        let mut service = Service::new(
-            ServiceSpec {
-                stops,
-                lines: vec![line(1), line(2)],
-                fleet: vec![FleetSpec {
-                    id: VehicleId::new(1),
-                    line: LineId::new(1),
-                    length_mm: nonzero(20),
-                    capacity: nonzero(2),
-                }],
-            },
-            &road,
-            |_| true,
-            |_| false,
-        )
-        .unwrap();
+        ServiceSpec {
+            stops,
+            lines: vec![line(1), line(2)],
+            fleet: vec![FleetSpec {
+                id: VehicleId::new(1),
+                line: LineId::new(1),
+                length_mm: nonzero(20),
+                capacity: nonzero(2),
+            }],
+        }
+    }
+
+    fn setup() -> (Service, RoadState) {
+        let mut road = road_without_leg(None);
+        let mut service = Service::new(spec(), &road, |_| true, |_| false).unwrap();
         step(&mut service, &mut road, 1);
         (service, road)
     }
@@ -910,6 +1120,181 @@ mod tests {
     }
 
     #[test]
+    fn disconnected_lines_require_explicit_allowance_and_a_matching_snapshot() {
+        let road = road_without_leg(Some(2));
+        let id = LineId::new(1);
+        let mut spec = spec();
+        spec.lines.truncate(1);
+        assert_eq!(
+            Service::new(spec.clone(), &road, |_| true, |_| false).unwrap_err(),
+            ServiceError::InvalidLine(id)
+        );
+        let mut service = Service::new_with_disconnections(
+            spec,
+            &road,
+            |_| true,
+            |_| false,
+            &std::collections::BTreeSet::from([id]),
+        )
+        .unwrap();
+        let snapshot = service.snapshot().unwrap();
+        assert!(snapshot.disconnected_lines().contains(&id));
+        assert!(service.observe(&road).lines[0].disconnected);
+        let mut forged = snapshot.clone();
+        forged.disconnected_lines.clear();
+        assert!(service.restore(Some(forged), Tick::new(0), &road).is_err());
+        service
+            .restore(Some(snapshot), Tick::new(0), &road)
+            .unwrap();
+    }
+
+    #[test]
+    fn edited_service_preserves_passengers_until_a_real_stop_before_a_missing_leg() {
+        let (mut service, mut road) = setup();
+        assert_eq!(service.enter_passengers(request(1, 1, 3, 2)), 2);
+        for time in 2..=6 {
+            assert!(step(&mut service, &mut road, time).is_empty());
+        }
+        let tick = Tick::new(6);
+        let (lanes, junctions) = road.snapshot();
+        let mut road = road_without_leg(Some(2));
+        road.restore(tick, lanes, junctions).unwrap();
+        let mut edited = Service::new_with_disconnections(
+            spec(),
+            &road,
+            |_| true,
+            |_| false,
+            &std::collections::BTreeSet::from([LineId::new(1), LineId::new(2)]),
+        )
+        .unwrap();
+        edited.reconcile(&service, tick, &road).unwrap();
+        assert_eq!(edited.observe(&road).vehicles[0].onboard, 2);
+        let events = step(&mut edited, &mut road, 7);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].replan_at, Some(ZoneId::new(2)));
+        assert_eq!(events[0].count, 2);
+        for time in 8..=14 {
+            assert!(step(&mut edited, &mut road, time).is_empty());
+        }
+        let vehicle = &edited.observe(&road).vehicles[0];
+        assert_eq!(vehicle.next_stop, Some(StopId::new(2)));
+        assert_eq!(vehicle.onboard, 0);
+        assert!(vehicle.disconnected);
+    }
+
+    #[test]
+    fn passengers_waiting_for_a_disconnected_line_replan_from_their_boarding_stop() {
+        let (mut service, road) = setup();
+        assert_eq!(service.enter_passengers(request(1, 2, 3, 2)), 2);
+        let tick = Tick::new(1);
+        let (lanes, junctions) = road.snapshot();
+        let mut road = road_without_leg(Some(2));
+        road.restore(tick, lanes, junctions).unwrap();
+        let mut edited = Service::new_with_disconnections(
+            spec(),
+            &road,
+            |_| true,
+            |_| false,
+            &BTreeSet::from([LineId::new(1), LineId::new(2)]),
+        )
+        .unwrap();
+        edited.reconcile(&service, tick, &road).unwrap();
+        let events = step(&mut edited, &mut road, 2);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].replan_at, Some(ZoneId::new(2)));
+        assert_eq!(events[0].count, 2);
+        assert_eq!(edited.observe(&road).stops[1].waiting_total, 0);
+        assert!(step(&mut edited, &mut road, 3).is_empty());
+    }
+
+    #[test]
+    fn blocked_bus_at_its_previous_stop_can_release_passengers_without_losing_its_target() {
+        let (mut service, mut road) = setup();
+        assert_eq!(service.enter_passengers(request(1, 1, 3, 2)), 2);
+        for time in 2..=5 {
+            step(&mut service, &mut road, time);
+        }
+        let tick = Tick::new(6);
+        service.tick(tick, &mut road);
+        let (mut lanes, junctions) = road.snapshot();
+        let bus = &mut lanes[0].queue[0];
+        assert_eq!(bus.route, [MovementId::new(1)]);
+        bus.route.clear();
+        bus.blocked_destination = Some(LaneId::new(2));
+        let mut road = road_without_leg(Some(1));
+        road.restore(tick, lanes, junctions).unwrap();
+        let mut edited = Service::new_with_disconnections(
+            spec(),
+            &road,
+            |_| true,
+            |_| false,
+            &BTreeSet::from([LineId::new(1), LineId::new(2)]),
+        )
+        .unwrap();
+        edited.reconcile(&service, tick, &road).unwrap();
+        let events = step(&mut edited, &mut road, 7);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].replan_at, Some(ZoneId::new(1)));
+        assert_eq!(events[0].count, 2);
+        let vehicle = &edited.observe(&road).vehicles[0];
+        assert_eq!(vehicle.next_stop, Some(StopId::new(2)));
+        assert_eq!(vehicle.planned_departure, Some(Tick::new(1)));
+        assert!(vehicle.disconnected);
+        assert!(step(&mut edited, &mut road, 8).is_empty());
+    }
+
+    #[test]
+    fn editing_a_service_preserves_live_dispatch_and_rejects_a_different_active_vehicle() {
+        let (service, road) = setup();
+        let mut expanded = spec();
+        expanded.fleet.push(FleetSpec {
+            id: VehicleId::new(2),
+            ..expanded.fleet[0].clone()
+        });
+        let mut edited = Service::new(expanded.clone(), &road, |_| true, |_| false).unwrap();
+        edited.reconcile(&service, Tick::new(1), &road).unwrap();
+        let status = edited.observe(&road);
+        assert_eq!(status.vehicles[0].planned_departure, Some(Tick::new(1)));
+        assert_eq!(status.vehicles[1].planned_departure, None);
+        expanded.fleet[0].length_mm = nonzero(21);
+        let mut incompatible = Service::new(expanded, &road, |_| true, |_| false).unwrap();
+        assert!(
+            incompatible
+                .reconcile(&service, Tick::new(1), &road)
+                .is_err()
+        );
+        assert_eq!(
+            incompatible.observe(&road).vehicles[0].planned_departure,
+            None
+        );
+    }
+
+    #[test]
+    fn reconcile_records_a_released_bus_that_an_edit_moved_off_its_origin_lane() {
+        let (mut service, mut road) = setup();
+        for time in 2..=4 {
+            step(&mut service, &mut road, time);
+        }
+        let tick = Tick::new(5);
+        service.tick(tick, &mut road);
+        road.tick(tick);
+        let (mut lanes, junctions) = road.snapshot();
+        assert!(lanes[0].departure.take().is_some());
+        let mut road = road_without_leg(None);
+        road.restore(tick, lanes, junctions).unwrap();
+        let mut edited = Service::new(spec(), &road, |_| true, |_| false).unwrap();
+        edited.reconcile(&service, tick, &road).unwrap();
+        step(&mut edited, &mut road, 6);
+        let line = &edited.observe(&road).lines[0];
+        assert_eq!(line.departed, 1);
+        assert_eq!(line.last_departure, Some(tick));
+        assert_eq!(line.last_delay, Some(4));
+        edited
+            .restore(edited.snapshot(), Tick::new(6), &road)
+            .unwrap();
+    }
+
+    #[test]
     fn boarding_uses_passenger_arrival_order_and_skips_other_lines() {
         let (mut service, mut road) = setup();
         let mut other_line = request(1, 1, 2, 1);
@@ -922,7 +1307,7 @@ mod tests {
         assert_eq!(service.enter_passengers(request(4, 1, 2, 1)), 0);
         step(&mut service, &mut road, 2);
 
-        let status = service.observe();
+        let status = service.observe(&road);
         assert_eq!(status.stops[0].waiting_total, 1);
         assert_eq!(status.vehicles[0].onboard, 2);
         assert_eq!(status.vehicles[0].dwell_until, Some(Tick::new(6)));
@@ -946,7 +1331,7 @@ mod tests {
         }
         let arrived = step(&mut service, &mut road, 7);
         assert_eq!(arrived[0].count, 2);
-        let status = service.observe();
+        let status = service.observe(&road);
         assert_eq!(status.stops[1].waiting_total, 1);
         assert_eq!(status.stops[1].oldest_waiting_since, Some(Tick::new(1)));
         assert_eq!(status.vehicles[0].onboard, 2);
@@ -964,7 +1349,7 @@ mod tests {
         assert_eq!(service.enter_passengers(late), 1);
         step(&mut service, &mut road, 5);
 
-        let status = service.observe();
+        let status = service.observe(&road);
         assert_eq!(status.stops[0].waiting_total, 0);
         assert_eq!(status.vehicles[0].onboard, 1);
         assert_eq!(status.vehicles[0].dwell_until, Some(Tick::new(6)));

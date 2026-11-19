@@ -188,6 +188,104 @@ fn taxis(sim: &Simulation) -> sim_core::TaxiObservation {
 }
 
 #[test]
+fn taxi_at_pickup_keeps_its_reservation_until_the_destination_reopens() {
+    use sim_core::{Command, EditAction, EditCommand, TaxiStatus};
+
+    let spec = scenario(false, 1);
+    let closed = spec.movements[1].clone();
+    let mut sim = Simulation::new_game(spec, RuleSet::default(), 42).unwrap();
+    sim.advance(2).unwrap();
+    assert_eq!(lane_taxis(&sim, 1), [7]);
+    sim.apply(Command::CommitEdit(EditCommand {
+        expected_revision: 0,
+        actions: vec![EditAction::RemoveMovement(closed.id)],
+    }))
+    .unwrap();
+    sim.advance(10).unwrap();
+    let mut restored = Simulation::load(&sim.save().unwrap()).unwrap();
+    let view = taxis(&restored);
+    assert_eq!((view.waiting_total, view.unassigned_total), (1, 0));
+    assert!(view.vehicles[0].disconnected);
+    assert!(matches!(
+        view.vehicles[0].status,
+        TaxiStatus::ToPickup { assignment } if assignment.passengers == 1
+    ));
+    assert_eq!(lane_taxis(&restored, 1), [7]);
+    restored
+        .apply(Command::CommitEdit(EditCommand {
+            expected_revision: 1,
+            actions: vec![EditAction::UpsertMovement(closed)],
+        }))
+        .unwrap();
+    restored.advance(10).unwrap();
+    assert_eq!(demand(&restored).arrived, 1);
+    let view = taxis(&restored);
+    assert_eq!(view.waiting_total, 0);
+    assert!(!view.vehicles[0].disconnected);
+}
+
+#[test]
+fn disconnected_taxi_keeps_its_assignment_and_road_space_in_both_driving_phases() {
+    use sim_core::{Command, EditAction, EditCommand};
+
+    for (closed_at, movement, lane, counts) in [(1, 1, 3, (1, 0)), (3, 4, 2, (0, 1))] {
+        let mut spec = scenario(false, 1);
+        spec.lanes.push(LaneSpec {
+            id: LaneId::new(4),
+            ..spec.lanes[1].clone()
+        });
+        spec.movements.push(MovementSpec {
+            id: MovementId::new(4),
+            from: LaneId::new(2),
+            to: LaneId::new(4),
+            ..spec.movements[1].clone()
+        });
+        spec.demand.zones[1].road_access = Some(LaneId::new(4));
+        let closed = spec
+            .movements
+            .iter()
+            .find(|candidate| candidate.id == MovementId::new(movement))
+            .unwrap()
+            .clone();
+
+        let mut sim = Simulation::new_game(spec, RuleSet::default(), 42).unwrap();
+        sim.advance(closed_at).unwrap();
+        let view = taxis(&sim);
+        let assignment = view.vehicles[0].status;
+        assert!(!view.vehicles[0].disconnected);
+        assert_eq!(lane_taxis(&sim, lane), [7]);
+        sim.apply(Command::CommitEdit(EditCommand {
+            expected_revision: 0,
+            actions: vec![EditAction::RemoveMovement(closed.id)],
+        }))
+        .unwrap();
+        sim.advance(12).unwrap();
+        let mut restored = Simulation::load(&sim.save().unwrap()).unwrap();
+        let view = demand(&restored);
+        assert_eq!((view.waiting, view.in_transit), counts);
+        let view = taxis(&restored);
+        assert_eq!(view.vehicles[0].status, assignment);
+        assert!(view.vehicles[0].disconnected);
+        assert_eq!(lane_taxis(&restored, lane), [7]);
+        let Observation::Lane(view) = restored.inspect(Query::Lane(LaneId::new(lane))).unwrap()
+        else {
+            panic!("lane");
+        };
+        assert_eq!(view.occupied_mm, 5_000);
+        restored
+            .apply(Command::CommitEdit(EditCommand {
+                expected_revision: 1,
+                actions: vec![EditAction::UpsertMovement(closed)],
+            }))
+            .unwrap();
+        assert!(!taxis(&restored).vehicles[0].disconnected);
+        restored.advance(20).unwrap();
+        assert!(lane_taxis(&restored, lane).is_empty());
+        assert_eq!(demand(&restored).arrived, 1);
+    }
+}
+
+#[test]
 fn same_origin_and_destination_bundle_but_other_destination_waits() {
     use sim_core::TaxiStatus;
     let mut spec = scenario(false, 1);

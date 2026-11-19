@@ -145,6 +145,7 @@ mod tests {
             cohort: Some(17),
             managed: false,
             recovery: None,
+            blocked_destination: None,
         }
     }
 
@@ -160,6 +161,7 @@ mod tests {
             cohort: None,
             managed: true,
             recovery: None,
+            blocked_destination: None,
         }
     }
 

@@ -1,6 +1,6 @@
 use crate::LayoutSpec;
 use crate::taxi::{TaxiSnapshot, TaxiSpec};
-use std::num::NonZeroU64;
+use std::{collections::BTreeSet, num::NonZeroU64};
 
 use serde::{Deserialize, Serialize};
 
@@ -73,6 +73,13 @@ impl ScenarioV1 {
     }
 
     pub(super) fn into_simulation(self) -> Result<Simulation, LoadError> {
+        self.into_simulation_with_disconnections(&BTreeSet::new())
+    }
+
+    fn into_simulation_with_disconnections(
+        self,
+        allowed: &BTreeSet<crate::LineId>,
+    ) -> Result<Simulation, LoadError> {
         let scenario = Scenario {
             start: self.start,
             building_ids: self.building_ids,
@@ -85,10 +92,11 @@ impl ScenarioV1 {
             taxi: self.taxi,
             layout: self.layout,
         };
-        Simulation::new_game(
+        Simulation::new_with_disconnections(
             scenario,
             RuleSet::new(self.development_period_ticks),
             self.seed,
+            allowed,
         )
         .map_err(LoadError::State)
     }
@@ -135,7 +143,12 @@ impl Payload {
     }
 
     pub(super) fn into_simulation(self) -> Result<Simulation, LoadError> {
-        let mut sim = self.scenario.into_simulation()?;
+        let empty = BTreeSet::new();
+        let allowed = self
+            .service
+            .as_ref()
+            .map_or(&empty, ServiceSnapshot::disconnected_lines);
+        let mut sim = self.scenario.into_simulation_with_disconnections(allowed)?;
         let elapsed = self
             .tick
             .seconds()
@@ -201,6 +214,8 @@ pub(crate) struct QueueItemV1 {
     pub(crate) managed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) recovery: Option<CarRecoveryV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) blocked_destination: Option<LaneId>,
 }
 
 #[derive(Deserialize, Serialize)]
