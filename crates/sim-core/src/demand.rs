@@ -1,6 +1,10 @@
 mod measurements;
+mod transit;
 
-use self::measurements::{TravelWindows, decimal};
+use self::{
+    measurements::{TravelWindows, decimal},
+    transit::{TransitState, WALK_TOKEN},
+};
 use std::{collections::BTreeMap, fmt, num::NonZeroU32};
 
 use serde::{Deserialize, Serialize};
@@ -8,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     FootEdgeSpec, JourneyMode, JourneyOption, LaneId, LoadError, Tick, WalkingError,
     routing::{JourneyPath, cost_weight, distribute},
+    service::Service,
     traffic::RoadState,
     walking::{Walking, WalkingSnapshot},
 };
@@ -67,6 +72,7 @@ pub struct DemandSpec {
     pub profiles: Vec<DemandProfile>,
     pub walk_weight: u32,
     pub car_weight: u32,
+    pub transit_weight: u32,
     pub planning_window_ticks: NonZeroU32,
 }
 
@@ -78,6 +84,7 @@ impl Default for DemandSpec {
             profiles: Vec::new(),
             walk_weight: 1,
             car_weight: 1,
+            transit_weight: 1,
             planning_window_ticks: DEFAULT_PLANNING_WINDOW,
         }
     }
@@ -90,6 +97,7 @@ impl DemandSpec {
             && self.profiles.is_empty()
             && self.walk_weight == 1
             && self.car_weight == 1
+            && self.transit_weight == 1
             && self.planning_window_ticks == DEFAULT_PLANNING_WINDOW
     }
 
@@ -149,6 +157,7 @@ pub struct DemandObservation {
     pub arrived: u64,
     pub unassigned: u64,
     pub pending_returns: u64,
+    pub transit_transferring: u64,
     pub scheduled_departures: u64,
     pub total_travel_ticks: u128,
     pub active: Vec<ActiveJourney>,
@@ -193,6 +202,14 @@ pub(crate) struct DemandSnapshot {
     #[serde(default)]
     measurements: TravelWindows,
     walking: WalkingSnapshot,
+    #[serde(default, skip_serializing_if = "TransitState::is_empty")]
+    transit: TransitState,
+}
+
+#[derive(Clone, Copy)]
+struct Planning<'a> {
+    road: &'a RoadState,
+    service: &'a Service,
 }
 
 #[derive(Debug)]
@@ -270,7 +287,8 @@ impl DemandState {
         &self,
         origin: ZoneId,
         destination: ZoneId,
-        road: &RoadState,
+        tick: Tick,
+        planning: Planning<'_>,
     ) -> Vec<(JourneyOption, JourneyPath)> {
         let mut paths = Vec::new();
         if self.spec.walk_weight != 0
@@ -292,7 +310,7 @@ impl DemandState {
                 self.zones[&origin].road_access,
                 self.zones[&destination].road_access,
             )
-            && let Some((cost, movements)) = road.route(from, to)
+            && let Some((cost, movements)) = planning.road.route(from, to)
         {
             paths.push((
                 self.option(
@@ -305,6 +323,35 @@ impl DemandState {
                 JourneyPath::Car { from, movements },
             ));
         }
+        if self.spec.transit_weight != 0
+            && let Some((path, cost)) =
+                planning
+                    .service
+                    .transit_path(origin, destination, tick, |a, b| self.walking.route(a, b))
+        {
+            let nominal = cost
+                .access_ticks
+                .saturating_add(cost.ride_ticks)
+                .saturating_add(cost.transfer_ticks)
+                .saturating_add(cost.wait_ticks);
+            let estimated = self
+                .state
+                .measurements
+                .estimate(origin, destination, JourneyMode::Transit)
+                .unwrap_or(nominal)
+                .max(nominal);
+            paths.push((
+                JourneyOption {
+                    mode: JourneyMode::Transit,
+                    access_ticks: cost.access_ticks,
+                    wait_ticks: cost.wait_ticks + (estimated - nominal),
+                    ride_ticks: cost.ride_ticks,
+                    transfer_ticks: cost.transfer_ticks,
+                    weight: cost_weight(self.spec.transit_weight, estimated),
+                },
+                JourneyPath::Transit(path),
+            ));
+        }
         paths
     }
 
@@ -312,28 +359,36 @@ impl DemandState {
         &self,
         origin: ZoneId,
         destination: ZoneId,
+        tick: Tick,
         road: &RoadState,
+        service: &Service,
     ) -> Vec<JourneyOption> {
-        self.options(origin, destination, road)
+        self.options(origin, destination, tick, Planning { road, service })
             .into_iter()
             .map(|(info, _)| info)
             .collect()
     }
 
-    pub(crate) fn tick_before_road(&mut self, tick: Tick, road: &mut RoadState) {
+    pub(crate) fn tick_before_road(
+        &mut self,
+        tick: Tick,
+        road: &mut RoadState,
+        service: &mut Service,
+    ) {
         if self.zones.is_empty() {
             return;
         }
+        let planning = Planning { road, service };
         let elapsed = tick.seconds() - 1;
         if elapsed.is_multiple_of(u64::from(self.spec.planning_window_ticks.get())) {
             self.state.measurements.close();
         }
         let day = elapsed / DAY_TICKS;
         if self.state.day != Some(day) {
-            self.open_day(day, tick, road);
+            self.open_day(day, tick, planning);
         }
         for cohort in self.state.scheduled.remove(&tick).into_iter().flatten() {
-            self.create(cohort, road);
+            self.create(cohort, planning);
         }
         for order in self.state.returns.remove(&tick).into_iter().flatten() {
             self.create(
@@ -347,7 +402,7 @@ impl DemandState {
                     waiting: order.amount,
                     in_transit: 0,
                 },
-                road,
+                planning,
             );
         }
 
@@ -355,9 +410,10 @@ impl DemandState {
             .walking
             .tick(tick, |movement, tick| road.signal_allows(movement, tick))
         {
-            self.arrive(id, u64::from(amount), tick);
+            self.walking_arrival(id, amount, tick);
         }
         self.admit(tick, road);
+        self.move_transit(tick, service);
     }
 
     pub(crate) fn after_road(&mut self, tick: Tick, road: &RoadState) {
@@ -366,7 +422,7 @@ impl DemandState {
         }
     }
 
-    fn open_day(&mut self, day: u64, tick: Tick, road: &RoadState) {
+    fn open_day(&mut self, day: u64, tick: Tick, planning: Planning<'_>) {
         self.state.day = Some(day);
         self.state.jobs_used.clear();
         let first_offset = ((tick.seconds() - 1) % DAY_TICKS) as u32;
@@ -383,12 +439,12 @@ impl DemandState {
                 break;
             };
             for index in profiles {
-                self.plan_window(index, day, departure, road);
+                self.plan_window(index, day, departure, planning);
             }
         }
     }
 
-    fn plan_window(&mut self, index: usize, day: u64, tick: Tick, road: &RoadState) {
+    fn plan_window(&mut self, index: usize, day: u64, tick: Tick, planning: Planning<'_>) {
         let profile = &self.spec.profiles[index];
         let purpose = profile.purpose;
         let numerator = u64::from(profile.rate_numerator);
@@ -414,7 +470,7 @@ impl DemandState {
             remainder[index] = (scaled % denominator) as u32;
             let amount = scaled / denominator;
             if amount != 0 {
-                self.assign(home, purpose, amount, tick, due, road);
+                self.assign(home, purpose, amount, tick, due, planning);
             }
         }
     }
@@ -426,7 +482,7 @@ impl DemandState {
         mut remaining: u64,
         tick: Tick,
         due: Tick,
-        road: &RoadState,
+        planning: Planning<'_>,
     ) {
         let mut candidates: Vec<_> = self
             .zones
@@ -441,10 +497,13 @@ impl DemandState {
                     return None;
                 }
                 let cost = self
-                    .options(origin, zone.id, road)
+                    .options(origin, zone.id, tick, planning)
                     .into_iter()
                     .map(|(info, _)| {
-                        (info.access_ticks + info.ride_ticks).saturating_add(info.wait_ticks)
+                        info.access_ticks
+                            .saturating_add(info.ride_ticks)
+                            .saturating_add(info.wait_ticks)
+                            .saturating_add(info.transfer_ticks)
                     })
                     .min()?;
                 Some((zone.id, capacity, cost, 0u64))
@@ -513,11 +572,11 @@ impl DemandState {
         }
     }
 
-    fn create(&mut self, cohort: Cohort, road: &RoadState) {
+    fn create(&mut self, cohort: Cohort, planning: Planning<'_>) {
         self.state.generated += cohort.waiting;
-        let options = cohort
-            .destination
-            .map_or_else(Vec::new, |to| self.options(cohort.origin, to, road));
+        let options = cohort.destination.map_or_else(Vec::new, |to| {
+            self.options(cohort.origin, to, cohort.created, planning)
+        });
         if options.is_empty() {
             self.insert(cohort);
             return;
@@ -549,6 +608,10 @@ impl DemandState {
             }
             let offered = cohort.waiting.min(u64::from(u32::MAX)) as u32;
             let admitted = match &cohort.path {
+                Some(JourneyPath::Transit(_)) => {
+                    self.state.transit.start(id, offered, tick);
+                    offered
+                }
                 Some(JourneyPath::Walk(path)) if path.is_empty() => {
                     local_arrivals.push((id, u64::from(offered)));
                     offered
@@ -639,6 +702,7 @@ impl DemandState {
                 .map(|cohort| cohort.waiting)
                 .sum(),
             total_travel_ticks: self.state.total_travel_ticks,
+            transit_transferring: self.state.transit.transferring(&self.state.cohorts),
             active,
         }
     }
@@ -657,10 +721,14 @@ impl DemandState {
         saved: Option<DemandSnapshot>,
         tick: Tick,
         road: &RoadState,
+        service: &Service,
     ) -> Result<(), LoadError> {
         let error = |field| LoadError::InvalidState { field };
         let Some(mut saved) = saved else {
-            if !self.spec.is_default() || road.car_cohorts().next().is_some() {
+            if !self.spec.is_default()
+                || road.car_cohorts().next().is_some()
+                || service.passenger_cohorts().next().is_some()
+            {
                 return Err(error("demand"));
             }
             return Ok(());
@@ -705,16 +773,25 @@ impl DemandState {
         }) {
             return Err(error("demand.scheduled"));
         }
-        let mut active_modes = BTreeMap::<(u64, bool), u128>::new();
+        let mut active_modes = BTreeMap::<(u64, JourneyMode), u128>::new();
         for (id, amount) in road.car_cohorts() {
-            *active_modes.entry((id, true)).or_default() += u128::from(amount);
+            *active_modes.entry((id, JourneyMode::Car)).or_default() += u128::from(amount);
         }
-        for (id, amount) in self.walking.cohorts() {
-            *active_modes.entry((id, false)).or_default() += u128::from(amount);
+        for (id, amount) in self.walking.cohorts().filter(|(id, _)| *id < WALK_TOKEN) {
+            *active_modes.entry((id, JourneyMode::Walk)).or_default() += u128::from(amount);
         }
+        saved.transit.validate(
+            &saved.cohorts,
+            tick,
+            service,
+            self.walking.cohorts(),
+            &mut active_modes,
+        )?;
+        let planning = Planning { road, service };
         let mut total = u128::from(saved.arrived);
         for (&id, cohort) in &saved.cohorts {
             if id >= saved.next_id
+                || id >= WALK_TOKEN
                 || cohort.created > tick
                 || !self.contains_zone(cohort.origin)
                 || cohort.destination.is_some_and(|to| !self.contains_zone(to))
@@ -724,14 +801,23 @@ impl DemandState {
                 return Err(error("demand.cohorts"));
             }
             if let Some(path) = &cohort.path {
-                let car = matches!(path, JourneyPath::Car { .. });
-                let count = active_modes.remove(&(id, car)).unwrap_or(0);
+                let count = active_modes.remove(&(id, path.mode())).unwrap_or(0);
                 if count != u128::from(cohort.in_transit) {
                     return Err(error("demand.in_transit"));
                 }
                 let to = cohort.destination.expect("validated destination");
-                let expected = self.options(cohort.origin, to, road);
-                if !expected.iter().any(|(_, candidate)| candidate == path) {
+                let valid = match path {
+                    JourneyPath::Transit(path) => {
+                        service.valid_transit_path(cohort.origin, to, path, |a, b| {
+                            self.walking.route(a, b)
+                        })
+                    }
+                    _ => self
+                        .options(cohort.origin, to, cohort.created, planning)
+                        .iter()
+                        .any(|(_, candidate)| candidate == path),
+                };
+                if !valid {
                     return Err(error("demand.path"));
                 }
             } else if cohort.in_transit != 0 {

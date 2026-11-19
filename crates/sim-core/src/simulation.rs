@@ -1,14 +1,16 @@
+use crate::LineId;
 use crate::world::World;
 use crate::{
     ClockObservation, Observation, Query, QueryError, RuleSet, Scenario, Tick, ValidationError,
 };
-use std::fmt;
+use std::{fmt, num::NonZeroU32};
 
 /// A mutation applied at a completed simulation boundary.
 #[non_exhaustive]
 pub enum Command {
     SetPaused(bool),
     SetGrowthPaused(bool),
+    SetLineHeadway { line: LineId, ticks: NonZeroU32 },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -22,11 +24,13 @@ pub struct CommandReceipt {
 #[non_exhaustive]
 pub enum CommandError {
     SequenceOverflow,
+    UnknownLine(LineId),
 }
 
 impl fmt::Display for CommandError {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnknownLine(line) => write!(out, "unknown line ID {}", line.get()),
             Self::SequenceOverflow => out.write_str("command sequence overflow"),
         }
     }
@@ -106,6 +110,11 @@ impl Simulation {
         match command {
             Command::SetPaused(paused) => self.paused = paused,
             Command::SetGrowthPaused(paused) => self.growth_paused = paused,
+            Command::SetLineHeadway { line, ticks } => {
+                if !self.world.service.set_headway(line, self.traffic, ticks) {
+                    return Err(CommandError::UnknownLine(line));
+                }
+            }
         }
         self.sequence = sequence;
         Ok(CommandReceipt {
@@ -143,7 +152,14 @@ impl Simulation {
             let tick = Tick::new(start.seconds() + offset + 1);
             self.world
                 .demand
-                .tick_before_road(tick, &mut self.world.road);
+                .tick_before_road(tick, &mut self.world.road, &mut self.world.service);
+            let alighting = self.world.service.arrive_at_stops(tick, &self.world.road);
+            if !alighting.is_empty() {
+                self.world.demand.alighting(alighting, tick);
+                self.world
+                    .demand
+                    .move_transit(tick, &mut self.world.service);
+            }
             self.world.service.tick(tick, &mut self.world.road);
             self.world.road.tick(tick);
             self.world.service.after_road(tick, &self.world.road);
@@ -196,7 +212,9 @@ impl Simulation {
                 Ok(Observation::Journeys(self.world.demand.alternatives(
                     from,
                     to,
+                    self.traffic,
                     &self.world.road,
+                    &self.world.service,
                 )))
             }
             Query::Lane(id) => self

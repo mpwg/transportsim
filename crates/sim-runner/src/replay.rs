@@ -19,6 +19,10 @@ struct TimedCommand {
 enum CommandInput {
     SetPaused(bool),
     SetGrowthPaused(bool),
+    SetLineHeadway {
+        line: sim_core::LineId,
+        ticks: std::num::NonZeroU32,
+    },
     Step,
 }
 
@@ -27,6 +31,7 @@ impl CommandInput {
         let command = match self {
             Self::SetPaused(paused) => Command::SetPaused(paused),
             Self::SetGrowthPaused(paused) => Command::SetGrowthPaused(paused),
+            Self::SetLineHeadway { line, ticks } => Command::SetLineHeadway { line, ticks },
             Self::Step => return Ok(Some(simulation.step()?)),
         };
         simulation.apply(command)?;

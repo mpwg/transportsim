@@ -451,3 +451,117 @@ fn new_process_resumes_a_bus_mid_dwell() {
     );
     assert_eq!(continued, baseline);
 }
+
+#[test]
+fn new_process_resumes_passengers_mid_transfer() {
+    use serde_json::json;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = dir.path().join("transfer.json");
+    let checkpoint = dir.path().join("checkpoint.json");
+    let destination = dir.path().join("destination.json");
+    let full_trace = dir.path().join("full.jsonl");
+    let suffix_trace = dir.path().join("suffix.jsonl");
+    let lanes: Vec<_> = [(1, "bus"), (2, "bus"), (3, "tram"), (4, "tram")]
+        .into_iter()
+        .map(|(id, kind)| {
+            json!({
+                "id": id, "capacity_mm": 60000, "travel_ticks": 1,
+                "discharge": {"millimetres": 60000, "ticks": 1}, "allowed": [kind]
+            })
+        })
+        .collect();
+    let movements: Vec<_> = [(1, 2, 1), (2, 1, 1), (3, 4, 2), (4, 3, 2)]
+        .into_iter()
+        .map(|(from, to, conflict_zone)| {
+            json!({
+                "id": from, "from": from, "to": to, "junction": 1,
+                "conflict_zones": [conflict_zone], "priority": 0
+            })
+        })
+        .collect();
+    let stops: Vec<_> = (1..=4)
+        .map(|id| {
+            json!({
+                "id": id, "zone": id, "lane": id, "capacity": 20,
+                "minimum_dwell": 3, "passengers_per_tick": 16
+            })
+        })
+        .collect();
+    let zones: Vec<_> = [(1, 4, 0), (2, 0, 0), (3, 0, 0), (4, 0, 4)]
+        .into_iter()
+        .map(|(id, residents, jobs)| {
+            json!({"id": id, "residents": residents, "jobs": jobs, "shops": 0, "road_access": null})
+        })
+        .collect();
+    let scenario = json!({
+        "seed": 42, "start": 0, "development_period_ticks": 86400, "building_ids": [],
+        "lanes": lanes, "movements": movements, "junctions": [{"id": 1, "phases": []}], "traffic": [],
+        "demand": {
+            "zones": zones, "walk_weight": 0, "car_weight": 0,
+            "foot_edges": [{"id": 1, "from": 2, "to": 3, "travel_ticks": 2, "capacity": 10, "discharge": 10}],
+            "profiles": [{"purpose": "work", "departure_offsets": [0], "return_offset": 1000,
+                "rate_numerator": 1, "rate_denominator": 1}]
+        },
+        "service": {
+            "stops": stops,
+            "lines": [
+                {"id": 1, "kind": "bus", "stops": [1, 2], "headway": 20, "first_departure": 1},
+                {"id": 2, "kind": "tram", "stops": [3, 4], "headway": 20, "first_departure": 5}
+            ],
+            "fleet": [
+                {"id": 12, "line": 1, "length_mm": 12000, "capacity": 8},
+                {"id": 21, "line": 2, "length_mm": 20000, "capacity": 8}
+            ]
+        }
+    });
+    fs::write(&fixture, serde_json::to_vec(&scenario).unwrap()).unwrap();
+
+    let uninterrupted = summary(run(&[
+        ("--scenario", fixture.as_os_str()),
+        ("--until-tick", OsStr::new("11")),
+        ("--trace", full_trace.as_os_str()),
+    ]));
+    let transfer = summary(run(&[
+        ("--scenario", fixture.as_os_str()),
+        ("--until-tick", OsStr::new("8")),
+        ("--save", checkpoint.as_os_str()),
+    ]));
+    assert_eq!(transfer["tick"], 8);
+    let saved: Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+    let walkers = saved["payload"]["demand"]["transit"]["walking"]
+        .as_object()
+        .expect("the checkpoint must contain the foot transfer");
+    assert_eq!(walkers.len(), 1);
+    let part = walkers.values().next().unwrap();
+    assert_eq!(part["leg"], 1);
+    assert_eq!(part["amount"], 4);
+
+    fs::remove_file(fixture).unwrap();
+    assert_eq!(
+        summary(run(&[("--load", checkpoint.as_os_str())])),
+        transfer
+    );
+    let resumed = summary(run(&[
+        ("--load", checkpoint.as_os_str()),
+        ("--until-tick", OsStr::new("11")),
+        ("--trace", suffix_trace.as_os_str()),
+        ("--save", destination.as_os_str()),
+    ]));
+    let tail = trace(&suffix_trace);
+    assert_eq!(tail, trace(&full_trace)[8..]);
+    assert_eq!(tail[1]["tick"], 10);
+    let tram = json!({"id": 21, "kind": "tram", "length_mm": 20000});
+    assert_eq!(tail[1]["lanes"][2]["id"], 3);
+    assert_eq!(
+        tail[1]["lanes"][2]["departure"],
+        json!({"entry": {"vehicle": tram}, "to": 4})
+    );
+    assert_eq!(tail[1]["lanes"][3]["id"], 4);
+    assert_eq!(tail[1]["lanes"][3]["queue"][0]["vehicle"], tram);
+    assert_eq!(resumed["tick"], 11);
+    assert_eq!(resumed, uninterrupted);
+
+    let arrived: Value = serde_json::from_slice(&fs::read(destination).unwrap()).unwrap();
+    assert_eq!(arrived["payload"]["demand"]["arrived"], 4);
+}

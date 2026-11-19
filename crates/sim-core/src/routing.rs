@@ -10,6 +10,7 @@ use crate::{FootEdgeId, LaneId, MovementId};
 pub enum JourneyMode {
     Walk,
     Car,
+    Transit,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,6 +28,7 @@ pub struct JourneyOption {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum JourneyPath {
     Walk(Vec<FootEdgeId>),
+    Transit(transit::TransitPath),
     Car {
         from: LaneId,
         movements: Vec<MovementId>,
@@ -36,6 +38,7 @@ pub(crate) enum JourneyPath {
 impl JourneyPath {
     pub(crate) fn mode(&self) -> JourneyMode {
         match self {
+            Self::Transit(_) => JourneyMode::Transit,
             Self::Walk(_) => JourneyMode::Walk,
             Self::Car { .. } => JourneyMode::Car,
         }

@@ -37,5 +37,5 @@ pub use walking::{FootEdgeId, FootEdgeSpec, WalkingError};
 
 pub use service::{
     FleetSpec, LineId, LineObservation, LineSpec, ServiceError, ServiceObservation, ServiceSpec,
-    ServiceVehicleObservation, StopId, StopSpec, TimetableObservation,
+    ServiceVehicleObservation, StopId, StopObservation, StopSpec, TimetableObservation,
 };

@@ -130,11 +130,11 @@ impl Payload {
             .road
             .restore(self.tick, self.lanes, self.junctions)?;
         sim.world
-            .demand
-            .restore(self.demand, self.tick, &sim.world.road)?;
-        sim.world
             .service
             .restore(self.service, self.tick, &sim.world.road)?;
+        sim.world
+            .demand
+            .restore(self.demand, self.tick, &sim.world.road, &sim.world.service)?;
         sim.traffic = self.tick;
         sim.development_ticks = self.development_ticks;
         sim.sequence = self.sequence;
