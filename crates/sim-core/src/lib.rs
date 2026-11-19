@@ -2,6 +2,8 @@
 
 mod demand;
 mod edit;
+mod growth;
+mod growth_runtime;
 mod ids;
 mod junction;
 mod layout;
@@ -54,3 +56,8 @@ pub use edit::{EditAction, EditCommand, EditError, EditPreview, TurnPocket};
 pub use layout::{BuildingSite, Cell, LayoutError, LayoutSpec, StreetSite, Terrain, TileSpec};
 
 pub use marker::{Marker, MarkerAnchor, MarkerId, MarkerObservation};
+
+pub use growth::{
+    GrowthError, GrowthObservation, GrowthProject, GrowthReason, GrowthRules, GrowthSite,
+    GrowthSiteObservation, GrowthSpec, GrowthTotals, GrowthUse, LocalRoad,
+};

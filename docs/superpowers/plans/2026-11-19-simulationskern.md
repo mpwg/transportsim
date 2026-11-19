@@ -153,10 +153,10 @@ Ein `CommandReceipt` enthält Tick, Eingabesequenz, betroffene IDs und fachliche
 
 **Dateien** `crates/sim-core/src/{growth,world,demand,routing,observe,simulation,save/v1}.rs`, `crates/sim-core/tests/growth.rs`.
 
-- [ ] Zwei identische Startstände mit erschließbarer Wiese und Arbeitsplätzen vergleichen. Nur einer erhält eine Linie. Seine Erreichbarkeit steigt, ein Bau mit drei Perioden Laufzeit aktiviert erst bei Fertigstellung Bevölkerung und am nächsten Tagesprofil entstehen Arbeitswege. Speichern nach erster Bauperiode lässt genau zwei weitere offen. Wachstumspause über zwei Periodengrenzen friert Fortschritt und Messfenster ein, Verkehr läuft und es gibt keine Nachholung. Zusätzlicher Grenzfall 9.999 Einwohner und zwei mögliche Zuzüge.
-- [ ] `cargo test -p sim-core --test growth` rot prüfen.
-- [ ] `GrowthState::close_period(&mut self, world: &mut World, …)` am Ende der Tickphasen einbinden. Erreichbarkeit, gemessene Bedienung, Bedarf und Fläche für deterministisch geordnete Kandidaten verwenden. Regelpaket legt Gewichte und Schwellen fest. Lokale Erschließung protokolliert ihr Motiv und respektiert Gelände, Brücken und Spielerinfrastruktur. Bauvorhaben reservieren Flächen und besitzen Restdauer. Weiterbau und Verdichtung berücksichtigen die Grenze von 10.000 Einwohnern. Baufortschritt und wirksame Messfenster zusammen pausieren.
-- [ ] Vergleich, Pause und neuer Quell-Ziel-Strom nach Neustart prüfen. Einzeltest und Workspace grün. Commit `feat: Stadtwachstum aus Erreichbarkeit berechnen`.
+- [x] Zwei identische Startstände mit erschließbarer Wiese und Arbeitsplätzen vergleichen. Nur einer erhält eine Linie. Seine Erreichbarkeit steigt, ein Bau mit drei Perioden Laufzeit aktiviert erst bei Fertigstellung Bevölkerung und am nächsten Tagesprofil entstehen Arbeitswege. Speichern nach erster Bauperiode lässt genau zwei weitere offen. Wachstumspause über zwei Periodengrenzen friert Fortschritt und Messfenster ein, Verkehr läuft und es gibt keine Nachholung. Zusätzlicher Grenzfall 9.999 Einwohner und zwei mögliche Zuzüge.
+- [x] `cargo test -p sim-core --test growth` rot prüfen.
+- [x] `GrowthState::close_period(&mut self, world: &mut World, …)` am Ende der Tickphasen einbinden. Erreichbarkeit, gemessene Bedienung, Bedarf und Fläche für deterministisch geordnete Kandidaten verwenden. Regelpaket legt Gewichte und Schwellen fest. Lokale Erschließung protokolliert ihr Motiv und respektiert Gelände, Brücken und Spielerinfrastruktur. Bauvorhaben reservieren Flächen und besitzen Restdauer. Weiterbau und Verdichtung berücksichtigen die Grenze von 10.000 Einwohnern. Baufortschritt und wirksame Messfenster zusammen pausieren.
+- [x] Vergleich, Pause und neuer Quell-Ziel-Strom nach Neustart prüfen. Einzeltest und Workspace grün. Commit `feat: Stadtwachstum aus Erreichbarkeit berechnen`.
 
 ### 11. Brückenstadt ausliefern und Fortsetzung abnehmen
 

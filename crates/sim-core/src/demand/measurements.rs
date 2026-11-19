@@ -22,6 +22,10 @@ struct Sample {
 }
 
 impl TravelWindows {
+    pub(super) fn is_empty(&self) -> bool {
+        self.pending.is_empty() && self.estimates.is_empty()
+    }
+
     pub(super) fn close(&mut self) {
         for (from, destinations) in std::mem::take(&mut self.pending) {
             let estimates = self.estimates.entry(from).or_default();

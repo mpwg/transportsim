@@ -1,3 +1,4 @@
+use crate::{GrowthError, GrowthSite, growth::GrowthSnapshot, growth_runtime};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -314,6 +315,15 @@ impl Draft {
                     .map_err(|error| {
                         EditError::WouldInvalidate(LoadError::State(ValidationError::Layout(error)))
                     })?;
+                if let Some(site) = self
+                    .scenario
+                    .growth
+                    .sites
+                    .iter_mut()
+                    .find(|site| site.building == *building)
+                {
+                    site.cell = *target;
+                }
                 self.affected_buildings.insert(*building);
             }
             EditAction::UpsertStreet(street) => {
@@ -647,7 +657,12 @@ impl Draft {
         changes
     }
 
-    fn finish(mut self, sim: &Simulation, revision: u64) -> Result<PreparedEdit, EditError> {
+    fn finish(
+        mut self,
+        sim: &Simulation,
+        revision: u64,
+        growth: Option<GrowthSnapshot>,
+    ) -> Result<PreparedEdit, EditError> {
         self.scenario.layout.sort_tables();
         let permitted = unchanged_lines(&sim.scenario.service, &self.scenario.service);
         let mut world = World::from_scenario(self.scenario.clone(), &permitted)
@@ -678,6 +693,25 @@ impl Draft {
             .demand
             .restore(self.demand, tick, &world.road, &world.service, &world.taxi)
             .map_err(invalid)?;
+        world
+            .growth
+            .restore(growth, world.demand.totals())
+            .map_err(invalid)?;
+        if !growth_runtime::reservations_fit(&self.scenario, &world.growth)
+            || self.scenario.growth.sites.iter().any(|site| {
+                world.growth.project(site.building).is_some()
+                    && sim
+                        .scenario
+                        .growth
+                        .sites
+                        .iter()
+                        .any(|old| old.building == site.building && old.cell != site.cell)
+            })
+        {
+            return Err(invalid(LoadError::InvalidState {
+                field: "growth.reserved_layout",
+            }));
+        }
         for (line, interval) in self.headways {
             if !world.service.set_headway(line, tick, interval) {
                 return Err(EditError::MissingLine(line));
@@ -722,7 +756,41 @@ pub(crate) fn prepare(sim: &Simulation, edit: &EditCommand) -> Result<PreparedEd
         draft.action(action, sim.traffic)?;
     }
     draft.normalize()?;
-    draft.finish(sim, revision)
+    draft.finish(sim, revision, sim.world.growth.snapshot())
+}
+
+pub(crate) fn prepare_growth(
+    sim: &Simulation,
+    site: &GrowthSite,
+) -> Result<PreparedEdit, EditError> {
+    let revision = sim
+        .network_revision
+        .checked_add(1)
+        .ok_or(EditError::RevisionOverflow)?;
+    let invalid =
+        |error| EditError::WouldInvalidate(LoadError::State(ValidationError::Growth(error)));
+    let mut growth = sim.world.growth.clone();
+    let tiers = growth
+        .tiers(site.building)
+        .ok_or_else(|| invalid(GrowthError::InvalidSite(site.building)))?;
+    let project = growth
+        .complete(site.building)
+        .ok_or_else(|| invalid(GrowthError::InvalidSite(site.building)))?;
+    let mut draft = Draft::new(sim);
+    if let Some(local) = site.local_road.as_ref().filter(|_| tiers == 0) {
+        draft.lanes.push(empty_lane(local.lane.id));
+        draft
+            .junctions
+            .extend(local.junctions.iter().map(|junction| JunctionV1 {
+                id: junction.id,
+                last_granted: Vec::new(),
+            }));
+        draft.affected.insert(local.lane.id);
+    }
+    growth_runtime::stage(&mut draft.scenario, site, project.amount, tiers).map_err(invalid)?;
+    draft.affected_buildings.insert(site.building);
+    draft.normalize()?;
+    draft.finish(sim, revision, growth.snapshot())
 }
 
 fn empty_lane(id: LaneId) -> LaneV1 {

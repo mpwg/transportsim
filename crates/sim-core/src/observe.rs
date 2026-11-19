@@ -1,3 +1,4 @@
+use crate::GrowthObservation;
 use crate::MarkerObservation;
 use crate::taxi::TaxiObservation;
 use crate::{
@@ -14,6 +15,7 @@ pub enum Query {
     Undo,
     Markers,
     Demand,
+    Growth,
     Service,
     Taxi,
     TimetableJourney { from: ZoneId, to: ZoneId },
@@ -31,6 +33,7 @@ pub enum Observation {
     Undo(Option<UndoObservation>),
     Markers(Vec<MarkerObservation>),
     Demand(DemandObservation),
+    Growth(GrowthObservation),
     Service(ServiceObservation),
     Taxi(TaxiObservation),
     TimetableJourney(Option<TimetableObservation>),

@@ -3,6 +3,11 @@ use crate::{
     BuildingId, JunctionSpec, LaneSpec, MovementSpec, RoadValidationError, Tick, TrafficSeed,
 };
 use crate::{DemandError, DemandSpec, demand::DemandState, traffic::RoadState};
+use crate::{
+    GrowthError, GrowthSpec,
+    growth::{Growth, MAX_POPULATION},
+    growth_runtime,
+};
 use crate::{LayoutError, LayoutSpec};
 use crate::{LineId, QueueEntry, ServiceError, ServiceSpec, service::Service};
 use std::{collections::BTreeSet, fmt, num::NonZeroU64};
@@ -21,6 +26,7 @@ pub struct Scenario {
     pub service: ServiceSpec,
     pub taxi: TaxiSpec,
     pub layout: LayoutSpec,
+    pub growth: GrowthSpec,
 }
 
 impl Scenario {
@@ -36,6 +42,7 @@ impl Scenario {
             service: ServiceSpec::default(),
             taxi: TaxiSpec::default(),
             layout: LayoutSpec::default(),
+            growth: GrowthSpec::default(),
         }
     }
 }
@@ -73,6 +80,7 @@ pub enum ValidationError {
     Service(ServiceError),
     Taxi(TaxiError),
     Layout(LayoutError),
+    Growth(GrowthError),
 }
 
 impl fmt::Display for ValidationError {
@@ -83,6 +91,7 @@ impl fmt::Display for ValidationError {
             Self::Service(error) => error.fmt(out),
             Self::Taxi(error) => error.fmt(out),
             Self::Layout(error) => error.fmt(out),
+            Self::Growth(error) => error.fmt(out),
             Self::DuplicateBuildingId { id, index } => {
                 write!(
                     out,
@@ -103,6 +112,7 @@ pub(crate) struct World {
     pub(crate) demand: DemandState,
     pub(crate) service: Service,
     pub(crate) taxi: Taxi,
+    pub(crate) growth: Growth,
 }
 
 impl World {
@@ -111,7 +121,7 @@ impl World {
         allowed_disconnected: &BTreeSet<LineId>,
     ) -> Result<Self, ValidationError> {
         let mut buildings = BTreeSet::new();
-        for (index, id) in scenario.building_ids.into_iter().enumerate() {
+        for (index, id) in scenario.building_ids.iter().copied().enumerate() {
             if !buildings.insert(id) {
                 return Err(ValidationError::DuplicateBuildingId { id, index });
             }
@@ -141,6 +151,7 @@ impl World {
             .validate_connections(&scenario.movements, |id| feet.contains(&id))
             .map_err(ValidationError::Layout)?;
         buildings.extend(scenario.layout.buildings.iter().map(|building| building.id));
+        growth_runtime::validate_sites(&scenario).map_err(ValidationError::Growth)?;
         let road = RoadState::new(
             scenario.lanes,
             scenario.movements,
@@ -167,12 +178,17 @@ impl World {
             seeded_vehicles.contains(&id) || line_vehicles.contains(&id)
         })
         .map_err(ValidationError::Taxi)?;
+        let growth = Growth::new(scenario.growth).map_err(ValidationError::Growth)?;
+        if demand.totals().residents > MAX_POPULATION {
+            return Err(ValidationError::Growth(GrowthError::PopulationLimit));
+        }
         Ok(Self {
             buildings,
             road,
             demand,
             service,
             taxi,
+            growth,
         })
     }
 }

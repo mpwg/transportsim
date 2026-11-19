@@ -1,6 +1,7 @@
 use crate::LayoutSpec;
 use crate::Marker;
 use crate::taxi::{TaxiSnapshot, TaxiSpec};
+use crate::{GrowthSpec, growth::GrowthSnapshot, growth_runtime};
 use std::{collections::BTreeSet, num::NonZeroU64};
 
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,8 @@ pub(super) struct ScenarioV1 {
     taxi: TaxiSpec,
     #[serde(default, skip_serializing_if = "LayoutSpec::is_empty")]
     layout: LayoutSpec,
+    #[serde(default, skip_serializing_if = "GrowthSpec::is_empty")]
+    growth: GrowthSpec,
 }
 
 impl ScenarioV1 {
@@ -46,6 +49,7 @@ impl ScenarioV1 {
             mut service,
             mut taxi,
             mut layout,
+            mut growth,
         } = sim.scenario.clone();
         building_ids.sort_unstable();
         lanes.sort_unstable_by_key(|lane| lane.id);
@@ -56,6 +60,7 @@ impl ScenarioV1 {
         service.sort_tables();
         taxi.sort_tables();
         layout.sort_tables();
+        growth.sort_tables();
         Self {
             seed: sim.seed,
             start,
@@ -70,6 +75,7 @@ impl ScenarioV1 {
             service,
             taxi,
             layout,
+            growth,
         }
     }
 
@@ -92,6 +98,7 @@ impl ScenarioV1 {
             service: self.service,
             taxi: self.taxi,
             layout: self.layout,
+            growth: self.growth,
         };
         Simulation::new_with_disconnections(
             scenario,
@@ -122,6 +129,8 @@ pub(super) struct Payload {
     service: Option<ServiceSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     taxi: Option<TaxiSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    growth: Option<GrowthSnapshot>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     markers: Vec<Marker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -144,6 +153,7 @@ impl Payload {
             demand: sim.world.demand.snapshot(),
             service: sim.world.service.snapshot(),
             taxi: sim.world.taxi.snapshot(),
+            growth: sim.world.growth.snapshot(),
             markers: sim.markers.values().cloned().collect(),
             undo: sim
                 .undo
@@ -161,7 +171,7 @@ impl Payload {
                     || before.tick > self.tick
                     || before.development_ticks > self.development_ticks
                     || before.sequence >= self.sequence
-                    || before.network_revision.checked_add(1) != Some(self.network_revision)
+                    || before.network_revision >= self.network_revision
                     || before.scenario.start != self.scenario.start
                     || before.scenario.seed != self.scenario.seed
                     || before.scenario.development_period_ticks
@@ -207,6 +217,16 @@ impl Payload {
             &sim.world.service,
             &sim.world.taxi,
         )?;
+        sim.world
+            .growth
+            .restore(self.growth, sim.world.demand.totals())?;
+        if !growth_runtime::reservations_fit(&sim.scenario, &sim.world.growth)
+            || !growth_runtime::completed_sites_fit(&sim.scenario, &sim.world.growth)
+        {
+            return Err(LoadError::InvalidState {
+                field: "growth.layout",
+            });
+        }
         sim.traffic = self.tick;
         sim.network_revision = self.network_revision;
         sim.development_ticks = self.development_ticks;

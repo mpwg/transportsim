@@ -242,6 +242,8 @@ impl Simulation {
             .development_ticks
             .checked_add(growth_ticks)
             .ok_or(AdvanceError::DevelopmentClockOverflow)?;
+        let growing = !self.growth_paused && !self.scenario.growth.sites.is_empty();
+        self.world.demand.sample_growth(growing);
         for offset in 0..ticks {
             let tick = Tick::new(start.seconds() + offset + 1);
             self.world.demand.tick_before_road(
@@ -263,6 +265,18 @@ impl Simulation {
             self.world.road.tick(tick);
             self.world.service.after_road(tick, &self.world.road);
             self.world.demand.after_road(tick, &self.world.road);
+            self.traffic = tick;
+            if !self.growth_paused {
+                self.development_ticks += 1;
+                if growing
+                    && self
+                        .development_ticks
+                        .is_multiple_of(self.rules.development_period_ticks())
+                {
+                    self.grow_city();
+                    self.world.demand.sample_growth(growing);
+                }
+            }
         }
         self.traffic = end;
         self.development_ticks = development;
@@ -276,6 +290,11 @@ impl Simulation {
     /// Iterates through existing lane IDs in stable order.
     pub fn lane_ids(&self) -> impl Iterator<Item = crate::LaneId> + '_ {
         self.world.road.lane_ids()
+    }
+
+    /// Number of active origin-destination journey groups.
+    pub fn active_journey_count(&self) -> usize {
+        self.world.demand.active_journey_count()
     }
 
     pub fn inspect(&self, query: Query) -> Result<Observation, QueryError> {
@@ -326,6 +345,9 @@ impl Simulation {
             )),
             Query::Taxi => Ok(Observation::Taxi(
                 self.world.taxi.observe(self.traffic, &self.world.road),
+            )),
+            Query::Growth => Ok(Observation::Growth(
+                self.world.growth.observe(self.world.demand.totals()),
             )),
             Query::Demand => Ok(Observation::Demand(
                 self.world.demand.observe(&self.world.taxi),

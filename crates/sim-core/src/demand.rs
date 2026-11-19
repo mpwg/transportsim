@@ -5,6 +5,7 @@ use self::{
     measurements::{TravelWindows, decimal},
     transit::{TransitState, WALK_TOKEN},
 };
+use crate::{GrowthTotals, GrowthUse, world::World};
 use std::{collections::BTreeMap, fmt, num::NonZeroU32};
 
 use serde::{Deserialize, Serialize};
@@ -214,6 +215,8 @@ pub(crate) struct DemandSnapshot {
     total_travel_ticks: u128,
     #[serde(default)]
     measurements: TravelWindows,
+    #[serde(default, skip_serializing_if = "TravelWindows::is_empty")]
+    growth_measurements: TravelWindows,
     walking: WalkingSnapshot,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     retry_parked: bool,
@@ -284,6 +287,7 @@ struct Planning<'a> {
     road: &'a RoadState,
     service: &'a Service,
     taxi: &'a Taxi,
+    for_growth: bool,
 }
 
 #[derive(Debug)]
@@ -293,6 +297,7 @@ pub(crate) struct DemandState {
     windows: BTreeMap<u32, Vec<usize>>,
     walking: Walking,
     state: DemandSnapshot,
+    sampling_growth: bool,
 }
 
 impl DemandState {
@@ -342,7 +347,79 @@ impl DemandState {
             windows,
             walking,
             state: DemandSnapshot::default(),
+            sampling_growth: false,
         })
+    }
+
+    pub(crate) fn active_journey_count(&self) -> usize {
+        self.state.cohorts.len()
+    }
+
+    pub(crate) fn totals(&self) -> GrowthTotals {
+        self.zones.values().fold(
+            GrowthTotals {
+                residents: 0,
+                jobs: 0,
+                shops: 0,
+            },
+            |mut totals, zone| {
+                totals.residents = totals.residents.saturating_add(zone.residents);
+                totals.jobs = totals.jobs.saturating_add(zone.jobs);
+                totals.shops = totals.shops.saturating_add(zone.shops);
+                totals
+            },
+        )
+    }
+
+    pub(crate) fn sample_growth(&mut self, enabled: bool) {
+        self.sampling_growth = enabled;
+    }
+
+    pub(crate) fn close_growth_measurements(&mut self) {
+        self.state.growth_measurements.close();
+    }
+
+    pub(crate) fn growth_accessibility(
+        &self,
+        origin: ZoneId,
+        usage: GrowthUse,
+        tick: Tick,
+        horizon: u32,
+        world: &World,
+    ) -> u64 {
+        let planning = Planning {
+            road: &world.road,
+            service: &world.service,
+            taxi: &world.taxi,
+            for_growth: true,
+        };
+        self.zones
+            .values()
+            .filter_map(|zone| {
+                let demand = match usage {
+                    GrowthUse::Housing => zone.jobs.saturating_add(zone.shops),
+                    GrowthUse::Jobs | GrowthUse::Shops => zone.residents,
+                };
+                if demand == 0 {
+                    return None;
+                }
+                let time = self
+                    .options(origin, zone.id, tick, planning)
+                    .into_iter()
+                    .map(|(info, _)| {
+                        info.access_ticks
+                            .saturating_add(info.wait_ticks)
+                            .saturating_add(info.ride_ticks)
+                            .saturating_add(info.transfer_ticks)
+                    })
+                    .min()?;
+                let weight = (u64::from(horizon) + 1).checked_sub(time)?;
+                if weight == 0 {
+                    return None;
+                }
+                Some((u64::from(demand) * weight / (u64::from(horizon) + 1)).max(1))
+            })
+            .fold(0, u64::saturating_add)
     }
 
     pub(crate) fn contains_zone(&self, zone: ZoneId) -> bool {
@@ -371,12 +448,18 @@ impl DemandState {
         tick: Tick,
         planning: Planning<'_>,
     ) -> Vec<(JourneyOption, JourneyPath)> {
+        let measurements = if planning.for_growth {
+            &self.state.growth_measurements
+        } else {
+            &self.state.measurements
+        };
         let mut paths = Vec::new();
         if self.spec.walk_weight != 0
             && let Some((cost, edges)) = self.walking.route(origin, destination)
         {
             paths.push((
-                self.option(
+                Self::option(
+                    measurements,
                     origin,
                     destination,
                     JourneyMode::Walk,
@@ -394,7 +477,8 @@ impl DemandState {
             && let Some((cost, movements)) = planning.road.route(from, to)
         {
             paths.push((
-                self.option(
+                Self::option(
+                    measurements,
                     origin,
                     destination,
                     JourneyMode::Car,
@@ -415,9 +499,7 @@ impl DemandState {
                 .saturating_add(cost.ride_ticks)
                 .saturating_add(cost.transfer_ticks)
                 .saturating_add(cost.wait_ticks);
-            let estimated = self
-                .state
-                .measurements
+            let estimated = measurements
                 .estimate(origin, destination, JourneyMode::Transit)
                 .unwrap_or(nominal)
                 .max(nominal);
@@ -437,9 +519,7 @@ impl DemandState {
             && let Some((wait, ride)) = planning.taxi.estimate(origin, destination, planning.road)
         {
             let nominal = wait.saturating_add(ride);
-            let estimated = self
-                .state
-                .measurements
+            let estimated = measurements
                 .estimate(origin, destination, JourneyMode::Taxi)
                 .unwrap_or(nominal)
                 .max(nominal);
@@ -475,6 +555,7 @@ impl DemandState {
                 road,
                 service,
                 taxi,
+                for_growth: false,
             },
         )
         .into_iter()
@@ -496,6 +577,7 @@ impl DemandState {
             road,
             service,
             taxi,
+            for_growth: false,
         };
         let elapsed = tick.seconds() - 1;
         let planning_boundary =
@@ -838,6 +920,15 @@ impl DemandState {
             self.state
                 .measurements
                 .record(cohort.origin, destination, mode, ticks, amount);
+            if self.sampling_growth {
+                self.state.growth_measurements.record(
+                    cohort.origin,
+                    destination,
+                    mode,
+                    ticks,
+                    amount,
+                );
+            }
         }
         if let Some(due) = cohort.return_due {
             let release = due.max(Tick::new(tick.seconds().saturating_add(1)));
@@ -1105,6 +1196,9 @@ impl DemandState {
         if !saved
             .measurements
             .valid(|zone| self.contains_zone(zone), saved.arrived)
+            || !saved
+                .growth_measurements
+                .valid(|zone| self.contains_zone(zone), saved.arrived)
             || saved.total_travel_ticks > u128::from(saved.arrived) * u128::from(tick.seconds())
         {
             return Err(error("demand.measurements"));
@@ -1113,16 +1207,14 @@ impl DemandState {
         Ok(())
     }
     fn option(
-        &self,
+        measurements: &TravelWindows,
         from: ZoneId,
         to: ZoneId,
         mode: JourneyMode,
         base: u32,
         ticks: u64,
     ) -> JourneyOption {
-        let estimated = self
-            .state
-            .measurements
+        let estimated = measurements
             .estimate(from, to, mode)
             .unwrap_or(ticks)
             .max(ticks);
