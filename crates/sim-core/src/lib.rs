@@ -42,7 +42,9 @@ pub use demand::{
     TripPurpose, ZoneId, ZoneSpec,
 };
 pub use routing::{JourneyMode, JourneyOption, transit::TransitCost};
-pub use walking::{FootEdgeId, FootEdgeSpec, WalkingError};
+pub use walking::{
+    FootEdgeId, FootEdgeSpec, FootTrafficGroup, FootTrafficObservation, WalkingError,
+};
 
 pub use service::{
     FleetSpec, LineId, LineObservation, LineSpec, ServiceError, ServiceObservation, ServiceSpec,

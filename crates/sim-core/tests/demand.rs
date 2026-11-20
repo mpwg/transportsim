@@ -290,7 +290,7 @@ fn a_signalized_foot_crossing_stays_blocked_until_green_across_reload() {
     let mut scenario = commute(3, 3, 1, 1);
     scenario.demand.profiles[0].departure_offsets = vec![0];
     scenario.demand.profiles[0].return_offset = 20;
-    scenario.demand.foot_edges[0].travel_ticks = nz(1);
+    scenario.demand.foot_edges[0].travel_ticks = nz(2);
     scenario.demand.foot_edges[0].signal = Some(MovementId::new(1));
     scenario.lanes = [1, 2]
         .map(|id| LaneSpec {
@@ -329,13 +329,48 @@ fn a_signalized_foot_crossing_stays_blocked_until_green_across_reload() {
         ],
     });
     let mut sim = Simulation::new_game(scenario, RuleSet::default(), 42).unwrap();
-    sim.advance(4).unwrap();
+    assert!(sim.pedestrians().is_empty());
+    sim.advance(1).unwrap();
+    let edges = sim.pedestrians();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].edge, FootEdgeId::new(1));
+    assert_eq!(edges[0].from, ZoneId::new(1));
+    assert_eq!(edges[0].to, ZoneId::new(2));
+    assert_eq!(edges[0].groups.len(), 1);
+    assert_eq!(edges[0].groups[0].people, 3);
+    assert_eq!(edges[0].groups[0].progress, 0.0);
+
+    sim.advance(1).unwrap();
+    assert_eq!(sim.pedestrians()[0].groups[0].progress, 0.5);
+    sim.advance(2).unwrap();
+    let saved = sim.save().unwrap();
+    let waiting = sim.pedestrians();
+    assert_eq!(waiting[0].groups[0].progress, 1.0);
+    assert_eq!(sim.save().unwrap(), saved);
     assert_eq!(demand(&sim).arrived, 0);
     assert_eq!(demand(&sim).in_transit, 3);
-    let mut restored = Simulation::load(&sim.save().unwrap()).unwrap();
+    let mut restored = Simulation::load(&saved).unwrap();
+    assert_eq!(restored.pedestrians(), waiting);
     restored.advance(1).unwrap();
+    assert!(restored.pedestrians().is_empty());
     assert_eq!(demand(&restored).arrived, 3);
     assert_eq!(demand(&restored).total_travel_ticks, 12);
+}
+
+#[test]
+fn pedestrian_groups_follow_the_on_edge_queue_order() {
+    let mut scenario = commute(3, 3, 1, 2);
+    scenario.demand.foot_edges[0].travel_ticks = nz(4);
+    let mut sim = Simulation::new_game(scenario, RuleSet::default(), 42).unwrap();
+    sim.advance(2).unwrap();
+    let edges = sim.pedestrians();
+    assert_eq!(edges.len(), 1);
+    let groups: Vec<_> = edges[0]
+        .groups
+        .iter()
+        .map(|group| (group.people, group.progress))
+        .collect();
+    assert_eq!(groups, [(1, 0.25), (2, 0.0)]);
 }
 
 fn contested_work_scenario() -> Scenario {

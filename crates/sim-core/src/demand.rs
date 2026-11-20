@@ -11,8 +11,8 @@ use std::{collections::BTreeMap, fmt, num::NonZeroU32};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    FootEdgeId, FootEdgeSpec, JourneyMode, JourneyOption, LaneId, LoadError, Simulation, Tick,
-    WalkingError,
+    FootEdgeId, FootEdgeSpec, FootTrafficObservation, JourneyMode, JourneyOption, LaneId,
+    LoadError, Simulation, Tick, WalkingError,
     routing::{JourneyPath, cost_weight, distribute},
     service::Service,
     taxi::{Taxi, TaxiRequest},
@@ -176,6 +176,11 @@ pub struct PrivateJourneyFlow {
 }
 
 impl Simulation {
+    /// Returns occupied foot links and pedestrian progress, ordered by link ID.
+    pub fn pedestrians(&self) -> Vec<FootTrafficObservation> {
+        self.world.demand.walking.observe(self.traffic)
+    }
+
     /// Finds the earliest walks from a zone within an inclusive time budget.
     ///
     /// Walks start at the current simulation boundary. Costs include signal waits

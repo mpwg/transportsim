@@ -37,6 +37,26 @@ pub struct FootEdgeSpec {
     pub signal: Option<MovementId>,
 }
 
+/// Pedestrians occupying a directed foot link at the current simulation boundary.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct FootTrafficObservation {
+    pub edge: FootEdgeId,
+    pub from: ZoneId,
+    pub to: ZoneId,
+    /// Groups in queue order, with earlier entries first.
+    pub groups: Vec<FootTrafficGroup>,
+}
+
+/// One group traveling together along a foot link.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct FootTrafficGroup {
+    pub people: u32,
+    /// Estimated progress in `0.0..=1.0`. A group held at the exit remains at 1.0.
+    pub progress: f32,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum WalkingError {
@@ -147,6 +167,38 @@ impl AccessWindow {
 }
 
 impl Walking {
+    pub(crate) fn observe(&self, tick: Tick) -> Vec<FootTrafficObservation> {
+        self.edges
+            .iter()
+            .filter(|(_, edge)| !edge.queue.is_empty())
+            .map(|(&id, edge)| {
+                let travel = u64::from(edge.spec.travel_ticks.get());
+                let groups = edge
+                    .queue
+                    .iter()
+                    .map(|group| {
+                        let elapsed = tick.seconds().saturating_sub(group.entered_at.seconds());
+                        let progress = if elapsed >= travel {
+                            1.0
+                        } else {
+                            (elapsed as f32 / travel as f32).min(1.0_f32.next_down())
+                        };
+                        FootTrafficGroup {
+                            people: group.count,
+                            progress,
+                        }
+                    })
+                    .collect();
+                FootTrafficObservation {
+                    edge: id,
+                    from: edge.spec.from,
+                    to: edge.spec.to,
+                    groups,
+                }
+            })
+            .collect()
+    }
+
     pub(crate) fn new(
         specs: Vec<FootEdgeSpec>,
         zones: &BTreeSet<ZoneId>,
