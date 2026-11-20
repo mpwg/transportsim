@@ -399,6 +399,23 @@ impl RoadState {
             .filter_map(|item| Some((item.cohort?, item.entry.units())))
     }
 
+    pub(crate) fn car_routes_via(
+        &self,
+        selected: LaneId,
+    ) -> impl Iterator<Item = (u64, u32, Vec<LaneId>)> + '_ {
+        self.lanes.iter().flat_map(move |(&lane, state)| {
+            state.queue.iter().filter_map(move |item| {
+                let cohort = item.cohort?;
+                let lanes =
+                    std::iter::once(lane).chain(item.route.iter().map(|id| self.movements[id].to));
+                lanes
+                    .clone()
+                    .any(|id| id == selected)
+                    .then(|| (cohort, item.entry.units(), lanes.collect()))
+            })
+        })
+    }
+
     pub(crate) fn car_recoveries(
         &self,
     ) -> impl Iterator<Item = (Option<u64>, LaneId, CarRecoveryV1)> + '_ {

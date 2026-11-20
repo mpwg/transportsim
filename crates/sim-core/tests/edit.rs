@@ -226,10 +226,18 @@ fn a_new_shortcut_preserves_the_valid_route_of_a_trip_already_underway() {
         actions: vec![EditAction::UpsertMovement(movement(3, 1, 3))],
     }))
     .unwrap();
+    let [start, intermediate, destination] = [1, 2, 3].map(LaneId::new);
     let mut loaded = Simulation::load(&sim.save().unwrap()).unwrap();
+    let flows = loaded.private_journeys_via(intermediate);
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0].lanes, [start, intermediate, destination]);
     loaded.advance(2).unwrap();
     assert_eq!(lane(&loaded, 2).queue, [QueueEntry::PrivateCars(nz(1))]);
     assert!(lane(&loaded, 3).queue.is_empty());
+    assert!(loaded.private_journeys_via(start).is_empty());
+    let flows = loaded.private_journeys_via(destination);
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0].lanes, [intermediate, destination]);
 }
 
 #[test]
@@ -333,6 +341,12 @@ fn private_cars_reach_the_exit_before_their_occupants_continue_on_foot() {
         .edit
         .unwrap();
     assert_eq!(receipt.vehicles_en_route_to_exit, 1);
+    let [start, exit_lane, original_destination] = [1, 2, 3].map(LaneId::new);
+    let flows = sim.private_journeys_via(exit_lane);
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0].to, goal);
+    assert_eq!(flows[0].lanes, [start, exit_lane]);
+    assert!(sim.private_journeys_via(original_destination).is_empty());
     assert_eq!(
         demand(&sim).active[0].mode,
         Some(sim_core::JourneyMode::Car)
@@ -342,6 +356,7 @@ fn private_cars_reach_the_exit_before_their_occupants_continue_on_foot() {
     let mut restored = Simulation::load(&sim.save().unwrap()).unwrap();
     restored.advance(1).unwrap();
     assert!(lane(&restored, 2).queue.is_empty());
+    assert!(restored.private_journeys_via(exit_lane).is_empty());
     assert_eq!(demand(&restored).arrived, 0);
     assert_eq!(demand(&restored).waiting, 1);
     assert_eq!(demand(&restored).active[0].location, exit);

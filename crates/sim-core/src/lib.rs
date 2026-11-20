@@ -38,8 +38,8 @@ pub use traffic::{
 };
 
 pub use demand::{
-    ActiveJourney, DemandError, DemandObservation, DemandProfile, DemandSpec, TripPurpose, ZoneId,
-    ZoneSpec,
+    ActiveJourney, DemandError, DemandObservation, DemandProfile, DemandSpec, PrivateJourneyFlow,
+    TripPurpose, ZoneId, ZoneSpec,
 };
 pub use routing::{JourneyMode, JourneyOption, transit::TransitCost};
 pub use walking::{FootEdgeId, FootEdgeSpec, WalkingError};

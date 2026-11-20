@@ -11,7 +11,7 @@ use std::{collections::BTreeMap, fmt, num::NonZeroU32};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    FootEdgeSpec, JourneyMode, JourneyOption, LaneId, LoadError, Tick, WalkingError,
+    FootEdgeSpec, JourneyMode, JourneyOption, LaneId, LoadError, Simulation, Tick, WalkingError,
     routing::{JourneyPath, cost_weight, distribute},
     service::Service,
     taxi::{Taxi, TaxiRequest},
@@ -158,6 +158,46 @@ pub struct ActiveJourney {
     pub created: Tick,
     pub waiting: u64,
     pub in_transit: u64,
+}
+
+/// Private cars with the same trip endpoints and remaining road route.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct PrivateJourneyFlow {
+    /// The trip's original source zone.
+    pub from: ZoneId,
+    /// The trip's intended destination zone, which may require a transfer after parking.
+    pub to: ZoneId,
+    /// Number of cars on this route at the current simulation boundary.
+    pub count: u32,
+    /// The occupied lane followed by the assigned lanes still ahead, in travel order.
+    pub lanes: Vec<LaneId>,
+}
+
+impl Simulation {
+    /// Groups private demand cars whose current or remaining route includes the given lane.
+    ///
+    /// This snapshot counts cars already on the road. It excludes people waiting to enter
+    /// the road, completed trips, other modes and seeded cars without trip endpoints.
+    /// Results are ordered by source zone, destination zone and remaining lane sequence.
+    /// An unknown lane produces an empty result.
+    pub fn private_journeys_via(&self, lane: LaneId) -> Vec<PrivateJourneyFlow> {
+        let mut flows = BTreeMap::<_, u32>::new();
+        for (id, count, lanes) in self.world.road.car_routes_via(lane) {
+            let cohort = &self.world.demand.state.cohorts[&id];
+            let to = cohort.destination.expect("road cars have a destination");
+            *flows.entry((cohort.origin, to, lanes)).or_default() += count;
+        }
+        flows
+            .into_iter()
+            .map(|((from, to, lanes), count)| PrivateJourneyFlow {
+                from,
+                to,
+                count,
+                lanes,
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]

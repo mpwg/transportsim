@@ -179,11 +179,58 @@ fn modes_share_whole_trips_and_a_full_road_keeps_the_rest_at_origin() {
     assert_eq!((car.waiting, car.in_transit), (3, 1));
     assert_eq!((walk.waiting, walk.in_transit), (0, 2));
 
+    let lane = LaneId::new(7);
+    let fingerprint = sim.fingerprint().unwrap();
+    let flows = sim.private_journeys_via(lane);
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0].from, ZoneId::new(1));
+    assert_eq!(flows[0].to, ZoneId::new(2));
+    assert_eq!(flows[0].count, 1);
+    assert_eq!(flows[0].lanes, [lane]);
+    assert!(sim.private_journeys_via(LaneId::new(8)).is_empty());
+    assert_eq!(sim.fingerprint().unwrap(), fingerprint);
+
     let mut restored = Simulation::load(&sim.save().unwrap()).unwrap();
+    assert_eq!(restored.private_journeys_via(lane), flows);
     restored.advance(4).unwrap();
     sim.advance(4).unwrap();
     assert_eq!(restored.fingerprint().unwrap(), sim.fingerprint().unwrap());
     assert!(demand(&restored).total_travel_ticks >= 9);
+}
+
+#[test]
+fn private_journeys_combine_matching_cohorts_and_exclude_seeded_cars() {
+    use sim_core::{DischargeRate, LaneId, LaneSpec, QueueEntry, TrafficSeed, VehicleKind};
+
+    let mut scenario = commute(1, 2, 1, 1);
+    let lane = LaneId::new(7);
+    for zone in &mut scenario.demand.zones {
+        zone.road_access = Some(lane);
+    }
+    scenario.demand.walk_weight = 0;
+    scenario.lanes.push(LaneSpec {
+        id: lane,
+        capacity_mm: nz(15_000),
+        travel_ticks: nz(3),
+        discharge: DischargeRate {
+            millimetres: nz(5_000),
+            ticks: nz(1),
+        },
+        allowed: vec![VehicleKind::Car],
+    });
+    scenario.traffic.push(TrafficSeed {
+        lane,
+        entry: QueueEntry::PrivateCars(nz(1)),
+        ready_at: Tick::new(3),
+        route: Vec::new(),
+    });
+    let mut sim = Simulation::new_game(scenario, RuleSet::default(), 42).unwrap();
+    assert!(sim.private_journeys_via(lane).is_empty());
+    sim.advance(2).unwrap();
+    assert_eq!(demand(&sim).active.len(), 2);
+    let flows = sim.private_journeys_via(lane);
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0].count, 2);
 }
 
 #[test]
