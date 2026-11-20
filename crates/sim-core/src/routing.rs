@@ -2,7 +2,21 @@ pub(crate) mod transit;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{FootEdgeId, LaneId, MovementId};
+use crate::{FootEdgeId, LaneId, MovementId, Simulation, VehicleKind};
+
+impl Simulation {
+    /// Returns the fastest free-flow route for `kind`, including both endpoint lanes.
+    /// A route within a single lane contains that lane once.
+    /// Returns `None` if no compatible route exists, including when either lane is unknown.
+    pub fn preview_vehicle_route(
+        &self,
+        from: LaneId,
+        to: LaneId,
+        kind: VehicleKind,
+    ) -> Option<Vec<LaneId>> {
+        self.world.road.route_lanes(kind, from, to)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
