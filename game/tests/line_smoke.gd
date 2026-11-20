@@ -11,6 +11,10 @@ func _check_line() -> void:
 		_fail("Das gemeinsame Linienwerkzeug fehlt.")
 		return
 	var stops: Array = [{"lane": 1, "zone": 1}, {"lane": 4, "zone": 5}]
+	var unreachable: Array = [{"lane": 1, "zone": 6}, {"lane": 4, "zone": 5}]
+	if core.line_draft("bus", unreachable, [[], []], 5, false).get("ok", false):
+		_fail("Ein Halt darf keinen Fußzugang über eine fremde Zone vortäuschen.")
+		return
 	var before: int = core.snapshot().stops.size()
 	var preview: Dictionary = core.line_draft("bus", stops, [[], []], 5, false)
 	if not preview.get("ok", false) or preview.routes.is_empty():
@@ -18,6 +22,11 @@ func _check_line() -> void:
 		return
 	if core.snapshot().stops.size() != before:
 		_fail("Vorschauberechnung hat das Netz verändert.")
+		return
+	var tram_stops: Array = [{"lane": 11, "zone": 4}, {"lane": 12, "zone": 5}]
+	var tram: Dictionary = core.line_draft("tram", tram_stops, [[], []], 5, true)
+	if not tram.get("ok", false) or tram.routes != [[11, 12], [12, 13, 11]]:
+		_fail("Die Straßenbahn muss auf verbundenen Gleisen fahren: " + str(tram))
 		return
 	var invalid: Dictionary = core.line_draft("tram", stops, [[], []], 5, true)
 	if invalid.get("ok", false):
@@ -40,8 +49,31 @@ func _check_line() -> void:
 	if not saw_bus:
 		_fail("Die eigene Linie hat kein Fahrzeug eingesetzt.")
 		return
-	print("Vorschau, Gleisbindung und tatsächlicher Linienbetrieb geprüft.")
+	var baseline: Object = ClassDB.instantiate("SimBridge")
+	var morning_line: Object = ClassDB.instantiate("SimBridge")
+	if not morning_line.line_draft("bus", stops, [[], []], 1, true).get("ok", false):
+		_fail("Die Linie für den Vergleich muss starten.")
+		return
+	for model in [baseline, morning_line]:
+		model.next_morning()
+		model.step(1)
+	if _cars_for_bridge(morning_line) >= _cars_for_bridge(baseline):
+		_fail("Die neue Linie muss im nächsten Morgenverkehr Autofahrten ersetzen.")
+		return
+	var waiting := 0
+	for stop in morning_line.snapshot().stops:
+		waiting += int(stop.waiting)
+	if waiting == 0:
+		_fail("Auf die neue Linie müssen Fahrgäste warten.")
+		return
+	print("Vorschau, Gleisbindung, Linienbetrieb und Wirkung im Morgenverkehr geprüft.")
 	quit()
+
+func _cars_for_bridge(core: Object) -> int:
+	var count := 0
+	for flow in core.private_flows(3):
+		count += int(flow.count)
+	return count
 
 func _fail(message: String) -> void:
 	push_error(message)

@@ -9,6 +9,7 @@ var city := CityScene.new()
 var focus := Vector3(32, 0, 4)
 var camera_size := 55.0
 var paused := false
+var pause_button: Button
 var time_buffer := 0.0
 var snapshot: Dictionary
 var world: Dictionary
@@ -34,6 +35,7 @@ var hover_lane := -1
 var dragged_leg := -1
 var drag_start := Vector2.ZERO
 var moving_stop := -1
+var moving_waypoint := Vector2i(-1, -1)
 var selected_source := -1
 var editing_line := -1
 var line_selector: OptionButton
@@ -141,24 +143,37 @@ func _make_toolbar() -> void:
 	launch_button.pressed.connect(_start_line)
 	line_panel.add_child(launch_button)
 	_toggle_button(tools, "Linie bauen", _set_drafting)
-	_toggle_button(tools, "Pause", func(_on: bool) -> void: toggle_pause())
+	pause_button = _toggle_button(tools, "Pause", func(_on: bool) -> void: toggle_pause())
+	var morning := Button.new()
+	morning.text = "Zum nächsten Morgen"
+	morning.pressed.connect(_next_morning)
+	tools.add_child(morning)
 	_toggle_button(tools, "Wartende", _set_waiting)
 	_toggle_button(tools, "Wege anzeigen", _set_journeys)
 
-func _toggle_button(parent: Control, title: String, action: Callable) -> void:
+func _toggle_button(parent: Control, title: String, action: Callable) -> Button:
 	var button := Button.new()
 	button.text = title
 	button.toggle_mode = true
 	button.custom_minimum_size = Vector2(110, 38)
 	button.toggled.connect(action)
 	parent.add_child(button)
+	return button
 
 func toggle_pause() -> void:
 	if not is_playable():
 		return
 	paused = not paused
 	core.pause(paused)
+	pause_button.set_pressed_no_signal(paused)
 	time_buffer = 0.0
+
+func _next_morning() -> void:
+	if not is_playable():
+		return
+	core.next_morning()
+	time_buffer = 0.0
+	_refresh_snapshot()
 
 func _process(delta: float) -> void:
 	if not is_playable():
@@ -174,6 +189,18 @@ func _process(delta: float) -> void:
 
 func _refresh_snapshot() -> void:
 	snapshot = core.snapshot()
+	if int(snapshot.get("revision", 0)) != int(world.get("revision", 0)):
+		world = core.world_data()
+		city.build(world.layout, world.lanes, world.stops)
+		_clear_marks(routes)
+		_clear_marks(waiting_markers)
+		_preview_line()
+	var positioned_walkers := []
+	for edge in snapshot.get("walkers", []):
+		var endpoints := _foot_endpoints(int(edge.edge), int(edge.from), int(edge.to))
+		if endpoints.size() == 2:
+			positioned_walkers.append({"edge": edge.edge, "from": endpoints[0], "to": endpoints[1], "groups": edge.groups})
+	snapshot.walkers = positioned_walkers
 	_update_waiting()
 	if shows_journeys:
 		_update_journeys()
@@ -194,7 +221,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and drafting:
 		_update_hover(event.position)
 	if event is InputEventMouseButton and not event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-		if dragged_leg >= 0 or moving_stop >= 0:
+		if dragged_leg >= 0 or moving_stop >= 0 or moving_waypoint.x >= 0:
 			_finish_drag(event.position)
 	if event is InputEventMouseButton and event.pressed:
 		match event.button_index:
@@ -383,6 +410,7 @@ func _set_drafting(on: bool) -> void:
 	status.text = "Wähle eine Straße oder ein Gleis für den ersten Halt." if on else ""
 
 func _clear_draft() -> void:
+	moving_waypoint = Vector2i(-1, -1)
 	draft_stops.clear()
 	draft_legs.clear()
 	waypoint_undo.clear()
@@ -439,6 +467,12 @@ func _build_at(screen: Vector2) -> void:
 		if int(stop.lane) == lane and city.point_on_lane(lane, 0.9).distance_to(point) < 2.3:
 			moving_stop = index
 			return
+	for leg_index in draft_legs.size():
+		for pin_index in draft_legs[leg_index].size():
+			var via := int(draft_legs[leg_index][pin_index])
+			if city.point_on_lane(via, 0.5).distance_to(point) < 2.3:
+				moving_waypoint = Vector2i(leg_index, pin_index)
+				return
 	var preview_routes: Array = draft_result.get("routes", [])
 	for index in mini(preview_routes.size(), draft_stops.size() - 1):
 		if lane in preview_routes[index]:
@@ -461,11 +495,17 @@ func _finish_drag(screen: Vector2) -> void:
 	var moved := screen.distance_to(drag_start) > 7
 	var leg := dragged_leg
 	var stop := moving_stop
+	var waypoint := moving_waypoint
 	dragged_leg = -1
 	moving_stop = -1
+	moving_waypoint = Vector2i(-1, -1)
 	if lane < 0:
 		return
-	if stop >= 0:
+	if waypoint.x >= 0:
+		if moved:
+			draft_legs[waypoint.x][waypoint.y] = lane
+			_preview_line()
+	elif stop >= 0:
 		if moved and _stop_zone(lane) >= 0 and not draft_stops.any(func(item: Dictionary) -> bool: return int(item.lane) == lane):
 			draft_stops[stop] = {"lane": lane, "zone": _stop_zone(lane)}
 			_preview_line()
@@ -500,6 +540,10 @@ func _redraw_draft() -> void:
 	_draw_access(candidates)
 	for index in draft_stops.size():
 		_draft_pin("stop" + str(index), int(draft_stops[index].lane), Color("#7ee4c8"))
+	for leg in draft_legs.size():
+		for pin in draft_legs[leg].size():
+			var color := Color("#a8d8f6") if draft_result.get("ok", false) else Color("#eda972")
+			_draft_pin("via_%d_%d" % [leg, pin], int(draft_legs[leg][pin]), color, 0.5)
 	if hover_lane >= 0:
 		_draft_pin("hover", hover_lane, Color("#d9f5b6a8"))
 
@@ -528,10 +572,9 @@ func _draw_access(candidates: Array) -> void:
 			var key := "walk_" + str(edge[0]) + "_" + str(edge[1])
 			if draft_marks.has(key):
 				continue
-			var start = _zone_position(int(edge[0]))
-			var destination = _zone_position(int(edge[1]))
-			if start != null and destination != null and not start.is_equal_approx(destination):
-				draft_marks[key] = _mark_curve(PackedVector3Array([start, destination]), color, 0.23)
+			var endpoints := _foot_endpoints(int(edge[2]), int(edge[0]), int(edge[1]))
+			if endpoints.size() == 2:
+				draft_marks[key] = _mark_curve(endpoints, color, 0.23)
 
 func _mark_access_houses(zone: int, color: Color) -> void:
 	for house in world.layout.buildings:
@@ -547,6 +590,36 @@ func _mark_access_houses(zone: int, color: Color) -> void:
 		marker.position = Vector3(float(house.cell.x) * 8, 0.16, float(house.cell.y) * 8)
 		draft_marks[key] = marker
 
+func _foot_endpoints(edge: int, from: int, to: int) -> PackedVector3Array:
+	var start = _zone_position(from)
+	var finish = _zone_position(to)
+	if start == null or finish == null or start.is_equal_approx(finish):
+		return PackedVector3Array()
+	for street in world.layout.get("streets", []):
+		if not edge in street.get("foot_edges", []):
+			continue
+		var curve: PackedVector3Array = city.lane_curve(int(street.lane))
+		if curve.size() < 2:
+			break
+		var first: Vector3 = curve[0]
+		var last: Vector3 = curve[-1]
+		var side := (last - first).normalized().cross(Vector3.UP)
+		var offset := 1.12
+		for lane in world.lanes:
+			if int(lane.id) == int(street.lane) and "tram" in lane.allowed:
+				offset = 0.89
+				break
+		first -= side * offset
+		last -= side * offset
+		if start.distance_to(last) + finish.distance_to(first) < start.distance_to(first) + finish.distance_to(last):
+			var prior := first
+			first = last
+			last = prior
+			side = -side
+		var pavement := side * 3.08 + Vector3.UP * 0.08
+		return PackedVector3Array([first + pavement, last + pavement])
+	return PackedVector3Array([start, finish])
+
 func _zone_position(zone: int) -> Variant:
 	for stop in draft_stops:
 		if int(stop.zone) == zone:
@@ -559,14 +632,14 @@ func _zone_position(zone: int) -> Variant:
 			return Vector3(float(house.cell.x) * 8, 0, float(house.cell.y) * 8)
 	return null
 
-func _draft_pin(key: String, lane: int, color: Color) -> void:
+func _draft_pin(key: String, lane: int, color: Color, fraction := 0.9) -> void:
 	var mark := _ground_mark(color)
 	var mesh := CylinderMesh.new()
 	mesh.top_radius = 0.44
 	mesh.bottom_radius = 0.6
 	mesh.height = 1.45
 	mark.mesh = mesh
-	mark.position = city.point_on_lane(lane, 0.9) + Vector3.UP * 0.82
+	mark.position = city.point_on_lane(lane, fraction) + Vector3.UP * 0.82
 	draft_marks[key] = mark
 
 func _start_line() -> void:

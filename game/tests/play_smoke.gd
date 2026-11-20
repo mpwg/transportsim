@@ -23,8 +23,12 @@ func _check_play() -> void:
 		quit(1)
 		return
 	game._set_drafting(true)
-	game._add_stop(1)
-	game._add_stop(4)
+	for lane_id in [1, 4]:
+		var world_point: Vector3 = game.city.point_on_lane(lane_id, 0.55)
+		var cursor: Vector2 = game.camera.unproject_position(world_point)
+		game._build_at(cursor)
+		if game.dragged_leg >= 0:
+			game._finish_drag(cursor)
 	if game.launch_button.disabled or game.draft_marks.is_empty():
 		push_error("Zwei gesetzte Haltestellen müssen eine sichtbare Linie ergeben.")
 		quit(1)

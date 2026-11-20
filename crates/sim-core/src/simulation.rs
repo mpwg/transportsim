@@ -144,6 +144,21 @@ impl Simulation {
         self.network_revision
     }
 
+    /// Current lane definitions, including roads built by city growth.
+    pub fn lane_specs(&self) -> &[crate::LaneSpec] {
+        &self.scenario.lanes
+    }
+
+    /// Current stops, including committed changes.
+    pub fn stop_specs(&self) -> &[crate::StopSpec] {
+        &self.scenario.service.stops
+    }
+
+    /// Current demand zones including newly occupied buildings.
+    pub fn zone_specs(&self) -> &[crate::ZoneSpec] {
+        &self.scenario.demand.zones
+    }
+
     /// Tests an edit against a copy of the current state.
     pub fn preview(&self, edit: &EditCommand) -> Result<EditPreview, EditError> {
         Ok(crate::edit::prepare(self, edit)?.preview)

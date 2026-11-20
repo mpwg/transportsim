@@ -23,6 +23,18 @@ func _check_world() -> void:
 	if int(after.tick) != int(before.tick) + 22:
 		_fail("Die Kernuhr ist nicht um 22 Schritte vorgerückt.")
 		return
+	if not core.has_method("next_morning"):
+		_fail("Für den Vergleich muss sich der nächste Morgen erreichen lassen.")
+		return
+	core.pause(true)
+	core.next_morning()
+	if int(core.snapshot().tick) != 86400:
+		_fail("Das Vorspulen endet an der nächsten Tagesgrenze.")
+		return
+	core.step(5)
+	if int(core.snapshot().tick) != 86400:
+		_fail("Eine zuvor pausierte Partie bleibt nach dem Vorspulen pausiert.")
+		return
 	print("Brückenstadt aus dem Rust-Kern geladen und weitergeschaltet.")
 	quit()
 

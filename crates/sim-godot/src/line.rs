@@ -76,18 +76,22 @@ impl SimBridge {
         };
         let mut actions = Vec::new();
         let mut stop_ids = Vec::new();
-        let mut new_stops = Vec::new();
         let mut next = self.next_id;
-        let stop_specs = self.scenario["service"]["stops"]
-            .as_array()
-            .ok_or("Die Stadt hat keine gültige Haltestellenliste.")?;
         for stop in draft {
-            if let Some(spec) = stop_specs.iter().find(|spec| {
-                spec["lane"].as_u64() == Some(stop.lane.get())
-                    && spec["zone"].as_u64() == Some(stop.zone.get())
-            }) {
-                stop_ids.push(StopId::new(spec["id"].as_u64().unwrap()));
+            if let Some(spec) = sim
+                .stop_specs()
+                .iter()
+                .find(|spec| spec.lane == stop.lane && spec.zone == stop.zone)
+            {
+                stop_ids.push(spec.id);
                 continue;
+            }
+            let access = sim
+                .zone_specs()
+                .iter()
+                .any(|zone| zone.id == stop.zone && zone.road_access == Some(stop.lane));
+            if !access {
+                return Err("An einem Halt fehlt ein passender Fußzugang.".into());
             }
             let id = StopId::new(next);
             next += 1;
@@ -100,20 +104,16 @@ impl SimBridge {
                 passengers_per_tick: NonZeroU32::new(5).unwrap(),
             };
             stop_ids.push(id);
-            new_stops.push(json!(spec));
             actions.push(EditAction::UpsertStop(spec));
         }
         let round_trip: u64 = routes
             .iter()
             .flatten()
             .map(|lane| {
-                self.scenario["lanes"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .find(|spec| spec["id"].as_u64() == Some(lane.get()))
-                    .and_then(|spec| spec["travel_ticks"].as_u64())
-                    .unwrap_or(0)
+                sim.lane_specs()
+                    .iter()
+                    .find(|spec| spec.id == *lane)
+                    .map_or(0, |spec| u64::from(spec.travel_ticks.get()))
             })
             .sum::<u64>()
             + draft.len() as u64 * 10;
@@ -199,10 +199,6 @@ impl SimBridge {
                     ..operation
                 },
             );
-            self.scenario["service"]["stops"]
-                .as_array_mut()
-                .unwrap()
-                .extend(new_stops);
         }
         Ok(json!({"ok":true,"routes":routes,"line":line}))
     }

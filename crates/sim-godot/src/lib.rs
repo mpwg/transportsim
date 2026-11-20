@@ -16,7 +16,6 @@ unsafe impl ExtensionLibrary for Extension {}
 #[derive(GodotClass)]
 #[class(base=RefCounted)]
 struct SimBridge {
-    scenario: Value,
     sim: Option<Simulation>,
     next_id: u64,
     lines: BTreeMap<u64, line::BuiltLine>,
@@ -55,8 +54,7 @@ impl IRefCounted for SimBridge {
     fn init(_base: Base<RefCounted>) -> Self {
         let result = start();
         match result {
-            Ok((scenario, sim)) => Self {
-                scenario,
+            Ok(sim) => Self {
                 sim: Some(sim),
                 next_id: 1_000,
                 lines: BTreeMap::new(),
@@ -64,7 +62,6 @@ impl IRefCounted for SimBridge {
             Err(error) => {
                 godot_error!("Die Brückenstadt konnte nicht geladen werden: {}", error);
                 Self {
-                    scenario: Value::Null,
                     sim: None,
                     next_id: 1_000,
                     lines: BTreeMap::new(),
@@ -74,7 +71,7 @@ impl IRefCounted for SimBridge {
     }
 }
 
-fn start() -> Result<(Value, Simulation), Box<dyn std::error::Error>> {
+fn start() -> Result<Simulation, Box<dyn std::error::Error>> {
     let mut data: Value =
         serde_json::from_str(include_str!("../../../scenarios/bridge-city.json"))?;
     // The introduction leaves the cross-river bus connection to the player.
@@ -83,6 +80,10 @@ fn start() -> Result<(Value, Simulation), Box<dyn std::error::Error>> {
             lane["allowed"].as_array_mut().unwrap().push(json!("bus"));
         }
     }
+    data["traffic"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|seed| seed["entry"]["vehicle"]["kind"] != "bus");
     for field in ["lines", "fleet"] {
         data["service"][field]
             .as_array_mut()
@@ -108,10 +109,7 @@ fn start() -> Result<(Value, Simulation), Box<dyn std::error::Error>> {
     input.growth = serde_json::from_value(data["growth"].clone())?;
     let period: NonZeroU64 = serde_json::from_value(data["development_period_ticks"].clone())?;
     let seed = serde_json::from_value(data["seed"].clone())?;
-    Ok((
-        data,
-        Simulation::new_game(input, RuleSet::new(period), seed)?,
-    ))
+    Ok(Simulation::new_game(input, RuleSet::new(period), seed)?)
 }
 
 #[godot_api]
@@ -125,10 +123,10 @@ impl SimBridge {
             return VarDictionary::new();
         };
         dictionary(json!({
-            "layout": layout,
-            "lanes": self.scenario["lanes"],
-            "stops": self.scenario["service"]["stops"],
-            "zones": self.scenario["demand"]["zones"],
+            "layout": layout, "revision": sim.network_revision(),
+            "lanes": sim.lane_specs(),
+            "stops": sim.stop_specs(),
+            "zones": sim.zone_specs(),
         }))
     }
 
@@ -136,6 +134,26 @@ impl SimBridge {
     fn step(&mut self, ticks: i64) {
         if let Some(sim) = self.sim.as_mut()
             && let Err(error) = sim.advance(ticks.clamp(0, 240) as u64)
+        {
+            godot_error!("{}", error);
+        }
+    }
+
+    #[func]
+    fn next_morning(&mut self) {
+        let Some(sim) = self.sim.as_mut() else { return };
+        let Ok(Observation::Clock(clock)) = sim.inspect(Query::Clock) else {
+            return;
+        };
+        if clock.paused && sim.apply(Command::SetPaused(false)).is_err() {
+            return;
+        }
+        let remaining = 86_400 - clock.traffic.seconds() % 86_400;
+        if let Err(error) = sim.advance(remaining) {
+            godot_error!("{}", error);
+        }
+        if clock.paused
+            && let Err(error) = sim.apply(Command::SetPaused(true))
         {
             godot_error!("{}", error);
         }
@@ -238,7 +256,7 @@ impl SimBridge {
                     .filter_map(|edge| {
                         if let Ok(Observation::FootEdge(spec)) = sim.inspect(Query::FootEdge(edge))
                         {
-                            Some(json!([spec.from, spec.to]))
+                            Some(json!([spec.from, spec.to, edge]))
                         } else {
                             None
                         }
@@ -277,12 +295,10 @@ impl SimBridge {
         };
         let mut lanes = Vec::new();
         let mut signals = Vec::new();
-        if let Some(specs) = self.scenario["lanes"].as_array() {
-            for spec in specs {
-                let Some(id) = spec["id"].as_u64() else {
-                    continue;
-                };
-                let Ok(Observation::Lane(lane)) = sim.inspect(Query::Lane(LaneId::new(id))) else {
+        {
+            for spec in sim.lane_specs() {
+                let id = spec.id.get();
+                let Ok(Observation::Lane(lane)) = sim.inspect(Query::Lane(spec.id)) else {
                     continue;
                 };
                 if let Some(green) = sim.lane_signal(LaneId::new(id)) {
@@ -317,19 +333,28 @@ impl SimBridge {
                 .stops
                 .iter()
                 .filter_map(|stop| {
-                    let spec = self.scenario["service"]["stops"]
-                        .as_array()?
-                        .iter()
-                        .find(|spec| spec["id"].as_u64() == Some(stop.id.get()))?;
+                    let spec = sim.stop_specs().iter().find(|spec| spec.id == stop.id)?;
                     Some(json!({
-                        "id": stop.id.get(), "lane": spec["lane"], "waiting": stop.waiting_total,
+                        "id": stop.id.get(), "lane": spec.lane, "waiting": stop.waiting_total,
                     }))
                 })
                 .collect(),
             _ => Vec::new(),
         };
+        let walkers: Vec<_> = sim
+            .pedestrians()
+            .into_iter()
+            .map(|edge| {
+                let groups: Vec<_> = edge
+                    .groups
+                    .into_iter()
+                    .map(|group| json!({"people":group.people,"progress":group.progress}))
+                    .collect();
+                json!({"edge":edge.edge,"from":edge.from,"to":edge.to,"groups":groups})
+            })
+            .collect();
         dictionary(
-            json!({ "tick": clock.traffic.seconds(), "lanes": lanes, "stops": stops, "signals": signals }),
+            json!({ "tick": clock.traffic.seconds(), "revision": sim.network_revision(), "lanes": lanes, "stops": stops, "signals": signals, "walkers": walkers }),
         )
     }
 }
