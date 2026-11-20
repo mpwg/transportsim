@@ -1,7 +1,12 @@
 use godot::prelude::*;
 use serde_json::{Value, json};
 use sim_core::{Command, LaneId, Observation, Query, QueueEntry, RuleSet, Scenario, Simulation};
-use std::num::NonZeroU64;
+use sim_core::{VehicleKind, ZoneId};
+use std::{
+    collections::BTreeMap,
+    num::{NonZeroU32, NonZeroU64},
+};
+mod line;
 
 struct Extension;
 
@@ -13,6 +18,8 @@ unsafe impl ExtensionLibrary for Extension {}
 struct SimBridge {
     scenario: Value,
     sim: Option<Simulation>,
+    next_id: u64,
+    lines: BTreeMap<u64, line::BuiltLine>,
 }
 
 fn dictionary(value: Value) -> VarDictionary {
@@ -51,12 +58,16 @@ impl IRefCounted for SimBridge {
             Ok((scenario, sim)) => Self {
                 scenario,
                 sim: Some(sim),
+                next_id: 1_000,
+                lines: BTreeMap::new(),
             },
             Err(error) => {
                 godot_error!("Die Brückenstadt konnte nicht geladen werden: {}", error);
                 Self {
                     scenario: Value::Null,
                     sim: None,
+                    next_id: 1_000,
+                    lines: BTreeMap::new(),
                 }
             }
         }
@@ -64,7 +75,26 @@ impl IRefCounted for SimBridge {
 }
 
 fn start() -> Result<(Value, Simulation), Box<dyn std::error::Error>> {
-    let data: Value = serde_json::from_str(include_str!("../../../scenarios/bridge-city.json"))?;
+    let mut data: Value =
+        serde_json::from_str(include_str!("../../../scenarios/bridge-city.json"))?;
+    // The introduction leaves the cross-river bus connection to the player.
+    for lane in data["lanes"].as_array_mut().into_iter().flatten() {
+        if matches!(lane["id"].as_u64(), Some(4 | 5)) {
+            lane["allowed"].as_array_mut().unwrap().push(json!("bus"));
+        }
+    }
+    for field in ["lines", "fleet"] {
+        data["service"][field]
+            .as_array_mut()
+            .unwrap()
+            .retain(|entry| {
+                if field == "lines" {
+                    entry["kind"] == "tram"
+                } else {
+                    matches!(entry["line"].as_u64(), Some(2 | 3))
+                }
+            });
+    }
     let mut input = Scenario::empty(serde_json::from_value(data["start"].clone())?);
     input.building_ids = serde_json::from_value(data["building_ids"].clone())?;
     input.lanes = serde_json::from_value(data["lanes"].clone())?;
@@ -121,6 +151,123 @@ impl SimBridge {
     }
 
     #[func]
+    fn line_draft(
+        &mut self,
+        kind: GString,
+        stops: VarArray,
+        legs: VarArray,
+        minutes: i64,
+        commit: bool,
+    ) -> VarDictionary {
+        self.line_edit(-1, kind, stops, legs, minutes, commit)
+    }
+
+    #[func]
+    fn line_edit(
+        &mut self,
+        line: i64,
+        kind: GString,
+        stops: VarArray,
+        legs: VarArray,
+        minutes: i64,
+        commit: bool,
+    ) -> VarDictionary {
+        let response = (|| {
+            let kind = match kind.to_string().as_str() {
+                "bus" => VehicleKind::Bus,
+                "tram" => VehicleKind::Tram,
+                _ => return Err("Wähle Bus oder Straßenbahn.".into()),
+            };
+            let headway = u32::try_from(minutes)
+                .ok()
+                .filter(|minutes| (1..=60).contains(minutes))
+                .and_then(|minutes| NonZeroU32::new(minutes * 60))
+                .ok_or("Wähle einen Takt zwischen einer und 60 Minuten.")?;
+            let stops = stops
+                .iter_shared()
+                .map(|stop| {
+                    let stop = stop.try_to::<VarDictionary>().ok()?;
+                    Some(line::DraftStop {
+                        lane: LaneId::new(id(&stop.get(&"lane".to_variant())?)?),
+                        zone: ZoneId::new(id(&stop.get(&"zone".to_variant())?)?),
+                    })
+                })
+                .collect::<Option<Vec<_>>>()
+                .ok_or("Ungültige Haltestelle.")?;
+            let legs = legs
+                .iter_shared()
+                .map(|leg| {
+                    let leg = leg.try_to::<VarArray>().ok()?;
+                    leg.iter_shared()
+                        .map(|lane| id(&lane).map(LaneId::new))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .collect::<Option<Vec<_>>>()
+                .ok_or("Ungültiger Wegpunkt.")?;
+            self.build_line(
+                u64::try_from(line).ok(),
+                kind,
+                &stops,
+                &legs,
+                headway,
+                commit,
+            )
+        })();
+        dictionary(response.unwrap_or_else(|error| json!({"ok":false,"error":error})))
+    }
+
+    #[func]
+    fn walking_access(&self, zone: i64, toward: bool) -> VarArray {
+        let Some(sim) = self.sim.as_ref() else {
+            return VarArray::new();
+        };
+        let Ok(zone) = u64::try_from(zone) else {
+            return VarArray::new();
+        };
+        let zone = ZoneId::new(zone);
+        let paths = if toward {
+            sim.walking_access_to(zone, 300)
+        } else {
+            sim.walking_access_from(zone, 300)
+        };
+        paths
+            .into_iter()
+            .map(|(zone, edges)| {
+                let legs: Vec<_> = edges
+                    .into_iter()
+                    .filter_map(|edge| {
+                        if let Ok(Observation::FootEdge(spec)) = sim.inspect(Query::FootEdge(edge))
+                        {
+                            Some(json!([spec.from, spec.to]))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                variant(&json!({"zone": zone, "legs": legs}))
+            })
+            .collect()
+    }
+
+    #[func]
+    fn private_flows(&self, lane: i64) -> VarArray {
+        let Some(sim) = self.sim.as_ref() else {
+            return VarArray::new();
+        };
+        let Ok(id) = u64::try_from(lane) else {
+            return VarArray::new();
+        };
+        sim.private_journeys_via(LaneId::new(id))
+            .iter()
+            .map(|flow| {
+                variant(&json!({
+                    "from": flow.from, "to": flow.to, "count": flow.count, "lanes": flow.lanes,
+                }))
+            })
+            .collect()
+    }
+
+    #[func]
     fn snapshot(&self) -> VarDictionary {
         let Some(sim) = self.sim.as_ref() else {
             return VarDictionary::new();
@@ -129,6 +276,7 @@ impl SimBridge {
             return VarDictionary::new();
         };
         let mut lanes = Vec::new();
+        let mut signals = Vec::new();
         if let Some(specs) = self.scenario["lanes"].as_array() {
             for spec in specs {
                 let Some(id) = spec["id"].as_u64() else {
@@ -137,6 +285,9 @@ impl SimBridge {
                 let Ok(Observation::Lane(lane)) = sim.inspect(Query::Lane(LaneId::new(id))) else {
                     continue;
                 };
+                if let Some(green) = sim.lane_signal(LaneId::new(id)) {
+                    signals.push(json!({"lane":id,"green":green}));
+                }
                 let cars: u64 = lane
                     .queue
                     .iter()
@@ -177,6 +328,12 @@ impl SimBridge {
                 .collect(),
             _ => Vec::new(),
         };
-        dictionary(json!({ "tick": clock.traffic.seconds(), "lanes": lanes, "stops": stops }))
+        dictionary(
+            json!({ "tick": clock.traffic.seconds(), "lanes": lanes, "stops": stops, "signals": signals }),
+        )
     }
+}
+
+fn id(value: &Variant) -> Option<u64> {
+    u64::try_from(value.try_to::<i64>().ok()?).ok()
 }
