@@ -11,12 +11,13 @@ use std::{collections::BTreeMap, fmt, num::NonZeroU32};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    FootEdgeSpec, JourneyMode, JourneyOption, LaneId, LoadError, Simulation, Tick, WalkingError,
+    FootEdgeId, FootEdgeSpec, JourneyMode, JourneyOption, LaneId, LoadError, Simulation, Tick,
+    WalkingError,
     routing::{JourneyPath, cost_weight, distribute},
     service::Service,
     taxi::{Taxi, TaxiRequest},
     traffic::RoadState,
-    walking::{Walking, WalkingSnapshot},
+    walking::{AccessWindow, Walking, WalkingSnapshot},
 };
 
 const DAY_TICKS: u64 = 86_400;
@@ -175,6 +176,46 @@ pub struct PrivateJourneyFlow {
 }
 
 impl Simulation {
+    /// Finds the earliest walks from a zone within an inclusive time budget.
+    ///
+    /// Walks start at the current simulation boundary. Costs include signal waits
+    /// along directed foot links and assume space is available on those links.
+    /// Results pair each reachable zone with its path in travel order, sorted by
+    /// zone ID. A known start zone has an empty path.
+    pub fn walking_access_from(
+        &self,
+        zone: ZoneId,
+        max_ticks: u32,
+    ) -> Vec<(ZoneId, Vec<FootEdgeId>)> {
+        self.world.demand.walking.access(
+            zone,
+            AccessWindow::DepartAt(self.traffic),
+            u64::from(max_ticks),
+            &self.world.road,
+        )
+    }
+
+    /// Finds the zones from which a walk can reach the destination by the budget deadline.
+    ///
+    /// Each result uses a route with the latest viable departure at or after the
+    /// current simulation boundary. Costs include signal waits along directed foot
+    /// links and assume space is available on those links. Results are sorted by
+    /// zone ID and each path is in travel order. A known destination has an empty path.
+    pub fn walking_access_to(
+        &self,
+        zone: ZoneId,
+        max_ticks: u32,
+    ) -> Vec<(ZoneId, Vec<FootEdgeId>)> {
+        let start = self.traffic.seconds();
+        let deadline = start.saturating_add(u64::from(max_ticks));
+        self.world.demand.walking.access(
+            zone,
+            AccessWindow::ArriveBy(Tick::new(deadline)),
+            deadline - start,
+            &self.world.road,
+        )
+    }
+
     /// Groups private demand cars whose current or remaining route includes the given lane.
     ///
     /// This snapshot counts cars already on the road. It excludes people waiting to enter

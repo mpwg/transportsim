@@ -495,6 +495,16 @@ impl RoadState {
             .is_some_and(|movement| self.junctions[&movement.junction].allows(id, tick))
     }
 
+    pub(crate) fn next_signal_green(&self, id: MovementId, tick: Tick) -> Option<Tick> {
+        let movement = self.movements.get(&id)?;
+        self.junctions[&movement.junction].next_green(id, tick)
+    }
+
+    pub(crate) fn previous_signal_green(&self, id: MovementId, tick: Tick) -> Option<Tick> {
+        let movement = self.movements.get(&id)?;
+        self.junctions[&movement.junction].previous_green(id, tick)
+    }
+
     pub(crate) fn new(
         lanes: Vec<LaneSpec>,
         movements: Vec<MovementSpec>,

@@ -1,4 +1,5 @@
 use crate::demand::ZoneId;
+use crate::traffic::RoadState;
 use crate::{MovementId, Tick};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -114,6 +115,37 @@ pub(crate) struct Walking {
     incoming: BTreeMap<ZoneId, Vec<FootEdgeId>>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum AccessWindow {
+    DepartAt(Tick),
+    ArriveBy(Tick),
+}
+
+impl AccessWindow {
+    fn traverse(self, edge: &FootEdgeSpec, cost: u64, road: &RoadState) -> Option<(ZoneId, u64)> {
+        let travel = u64::from(edge.travel_ticks.get());
+        match self {
+            Self::DepartAt(start) => {
+                let ready = Tick::new(start.seconds().checked_add(cost)?.checked_add(travel)?);
+                let exit = match edge.signal {
+                    Some(signal) => road.next_signal_green(signal, ready)?,
+                    None => ready,
+                };
+                Some((edge.to, exit.seconds() - start.seconds()))
+            }
+            Self::ArriveBy(deadline) => {
+                let latest_exit = Tick::new(deadline.seconds().checked_sub(cost)?);
+                let exit = match edge.signal {
+                    Some(signal) => road.previous_signal_green(signal, latest_exit)?,
+                    None => latest_exit,
+                };
+                let enter = exit.seconds().checked_sub(travel)?;
+                Some((edge.from, deadline.seconds() - enter))
+            }
+        }
+    }
+}
+
 impl Walking {
     pub(crate) fn new(
         specs: Vec<FootEdgeSpec>,
@@ -208,6 +240,56 @@ impl Walking {
             zone = self.edges[&id].spec.to;
         }
         Some((total, path))
+    }
+
+    pub(crate) fn access(
+        &self,
+        zone: ZoneId,
+        window: AccessWindow,
+        budget: u64,
+        road: &RoadState,
+    ) -> Vec<(ZoneId, Vec<FootEdgeId>)> {
+        let outgoing = matches!(window, AccessWindow::DepartAt(_));
+        let edges = if outgoing {
+            &self.outgoing
+        } else {
+            &self.incoming
+        };
+        if !edges.contains_key(&zone) {
+            return Vec::new();
+        }
+        // Cost measures elapsed time from departure, or time remaining until the deadline.
+        let mut best = BTreeMap::from([(zone, (0, None))]);
+        let mut frontier = BinaryHeap::from([Reverse((0, zone))]);
+        while let Some(Reverse((cost, current))) = frontier.pop() {
+            if best[&current].0 != cost {
+                continue;
+            }
+            for &id in &edges[&current] {
+                let Some((next, candidate)) = window.traverse(&self.edges[&id].spec, cost, road)
+                else {
+                    continue;
+                };
+                if candidate <= budget && best.get(&next).is_none_or(|&(old, _)| candidate < old) {
+                    best.insert(next, (candidate, Some((current, id))));
+                    frontier.push(Reverse((candidate, next)));
+                }
+            }
+        }
+        best.keys()
+            .map(|&reachable| {
+                let mut current = reachable;
+                let mut path = Vec::new();
+                while let Some((next, edge)) = best[&current].1 {
+                    path.push(edge);
+                    current = next;
+                }
+                if outgoing {
+                    path.reverse();
+                }
+                (reachable, path)
+            })
+            .collect()
     }
 
     fn route_end(&self, mut zone: ZoneId, route: &[FootEdgeId]) -> Option<ZoneId> {

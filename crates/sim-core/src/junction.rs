@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, num::NonZeroU32};
+use std::{collections::BTreeMap, num::NonZeroU32, ops::Range};
 
 use crate::Tick;
 use crate::network::{JunctionId, LaneId, MovementId};
@@ -60,6 +60,62 @@ impl JunctionState {
         }
         false
     }
+
+    pub(crate) fn next_green(&self, movement: MovementId, tick: Tick) -> Option<Tick> {
+        if self.cycle_ticks == 0 {
+            return Some(tick);
+        }
+        let offset = tick.seconds().saturating_sub(1) % self.cycle_ticks;
+        let mut windows = self.green_windows(movement).peekable();
+        let first = windows.peek()?.start;
+        let wait = windows.find(|window| offset < window.end).map_or_else(
+            || self.cycle_ticks - offset + first,
+            |window| window.start.saturating_sub(offset),
+        );
+        if wait == 0 {
+            return Some(tick);
+        }
+        tick.seconds().max(1).checked_add(wait).map(Tick::new)
+    }
+
+    pub(crate) fn previous_green(&self, movement: MovementId, tick: Tick) -> Option<Tick> {
+        if self.cycle_ticks == 0 {
+            return Some(tick);
+        }
+        let offset = tick.seconds().saturating_sub(1) % self.cycle_ticks;
+        let mut latest_in_cycle = None;
+        let mut end_of_last_green = None;
+        for window in self.green_windows(movement) {
+            let end = window.end - 1;
+            if window.start <= offset {
+                latest_in_cycle = Some(end.min(offset));
+            }
+            end_of_last_green = Some(end);
+        }
+        let wait = if let Some(latest) = latest_in_cycle {
+            offset - latest
+        } else {
+            self.cycle_ticks - end_of_last_green? + offset
+        };
+        if wait == 0 {
+            return Some(tick);
+        }
+        // The initial boundary repeats tick one's phase, not the end of an earlier cycle.
+        let previous = tick.seconds().checked_sub(wait)?;
+        (previous != 0).then_some(Tick::new(previous))
+    }
+
+    fn green_windows(&self, movement: MovementId) -> impl Iterator<Item = Range<u64>> + '_ {
+        self.spec
+            .phases
+            .iter()
+            .scan(0, |offset, phase| {
+                let green = *offset..*offset + u64::from(phase.green_ticks.get());
+                *offset += phase.duration();
+                Some((phase, green))
+            })
+            .filter_map(move |(phase, green)| phase.movements.contains(&movement).then_some(green))
+    }
 }
 
 #[cfg(test)]
@@ -106,6 +162,21 @@ mod tests {
             assert_eq!(junction.allows(left, tick), left_green, "tick {tick:?}");
             assert!(!junction.allows(unlisted, tick), "tick {tick:?}");
         }
+
+        for movement in [straight, left, unlisted] {
+            for seconds in 0..24 {
+                let tick = Tick::new(seconds);
+                let next = (seconds..=seconds + 6)
+                    .map(Tick::new)
+                    .find(|&candidate| junction.allows(movement, candidate));
+                let previous = (0..=seconds)
+                    .rev()
+                    .map(Tick::new)
+                    .find(|&candidate| junction.allows(movement, candidate));
+                assert_eq!(junction.next_green(movement, tick), next);
+                assert_eq!(junction.previous_green(movement, tick), previous);
+            }
+        }
     }
 
     #[test]
@@ -116,7 +187,13 @@ mod tests {
         });
 
         for seconds in [0, 1, u64::MAX] {
-            assert!(junction.allows(MovementId::new(1), Tick::new(seconds)));
+            let tick = Tick::new(seconds);
+            assert!(junction.allows(MovementId::new(1), tick));
+            assert_eq!(junction.next_green(MovementId::new(1), tick), Some(tick));
+            assert_eq!(
+                junction.previous_green(MovementId::new(1), tick),
+                Some(tick)
+            );
         }
     }
 }
