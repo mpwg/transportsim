@@ -702,6 +702,21 @@ impl RoadState {
         self.lanes.keys().copied()
     }
 
+    pub(crate) fn lane_signal(&self, lane: LaneId, tick: Tick) -> Option<bool> {
+        let mut has_signal = false;
+        for &id in &self.lanes.get(&lane)?.outgoing {
+            let junction = &self.junctions[&self.movements[&id].junction];
+            if junction.spec.phases.is_empty() {
+                continue;
+            }
+            has_signal = true;
+            if junction.allows(id, tick) {
+                return Some(true);
+            }
+        }
+        has_signal.then_some(false)
+    }
+
     pub(crate) fn snapshot(&self) -> (Vec<LaneV1>, Vec<JunctionV1>) {
         let lanes = self
             .lanes

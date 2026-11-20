@@ -298,6 +298,12 @@ impl Simulation {
         self.world.road.lane_ids()
     }
 
+    /// Returns whether any signal-controlled movement from this lane is green now.
+    /// Returns `None` for unknown lanes and lanes without signal-controlled movements.
+    pub fn lane_signal(&self, lane: crate::LaneId) -> Option<bool> {
+        self.world.road.lane_signal(lane, self.traffic)
+    }
+
     /// Number of active origin-destination journey groups.
     pub fn active_journey_count(&self) -> usize {
         self.world.demand.active_journey_count()

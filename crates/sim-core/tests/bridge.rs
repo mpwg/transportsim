@@ -71,6 +71,60 @@ fn phase(ticks: u32, moves: &[u64]) -> SignalPhase {
 }
 
 #[test]
+fn lane_signal_tracks_only_its_own_regulated_movements() {
+    let mut spec = Scenario::empty(Tick::new(0));
+    spec.lanes = (1..=6).map(|id| lane(id, 30_000)).collect();
+    let unsignalized = JunctionId::new(2);
+    spec.movements = vec![
+        movement(1, 1, 2),
+        movement(2, 1, 3),
+        movement(3, 4, 3),
+        MovementSpec {
+            junction: unsignalized,
+            ..movement(4, 5, 6)
+        },
+        MovementSpec {
+            junction: unsignalized,
+            ..movement(5, 1, 6)
+        },
+    ];
+    spec.junctions = vec![
+        JunctionSpec {
+            id: JunctionId::new(1),
+            phases: vec![
+                SignalPhase {
+                    clearance_ticks: 1,
+                    ..phase(1, &[1])
+                },
+                phase(1, &[2]),
+                phase(1, &[3]),
+            ],
+        },
+        JunctionSpec {
+            id: unsignalized,
+            phases: vec![],
+        },
+    ];
+    let mut sim = Simulation::new_game(spec, RuleSet::default(), 4).unwrap();
+
+    for (first, second) in [
+        (true, false),
+        (true, false),
+        (false, false),
+        (true, false),
+        (false, true),
+        (true, false),
+    ] {
+        assert_eq!(sim.lane_signal(LaneId::new(1)), Some(first));
+        assert_eq!(sim.lane_signal(LaneId::new(4)), Some(second));
+        sim.advance(1).unwrap();
+    }
+    for id in [2, 5, 99] {
+        assert_eq!(sim.lane_signal(LaneId::new(id)), None);
+    }
+}
+
+#[test]
 fn bus_waits_behind_left_turners_and_crosses_as_one_vehicle() {
     let mut spec = Scenario::empty(Tick::new(0));
     spec.lanes = vec![lane(1, 60_000), lane(2, 60_000), lane(3, 60_000)];
