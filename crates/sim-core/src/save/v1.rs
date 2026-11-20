@@ -3,13 +3,16 @@ use crate::Marker;
 use crate::random::RandomState;
 use crate::taxi::{TaxiSnapshot, TaxiSpec};
 use crate::{GrowthSpec, growth::GrowthSnapshot, growth_runtime};
-use std::{collections::BTreeSet, num::NonZeroU64};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU64,
+};
 
 use serde::{Deserialize, Serialize};
 
 use super::LoadError;
 use crate::{
-    BuildingId, JunctionId, JunctionSpec, LaneDeparture, LaneId, LaneSpec, MovementId,
+    BuildingId, JunctionId, JunctionSpec, LaneDeparture, LaneId, LaneSpec, LineId, MovementId,
     MovementSpec, QueueEntry, RuleSet, Scenario, Simulation, Tick, TrafficSeed, WaitReason,
 };
 use crate::{DemandSpec, ServiceSpec, demand::DemandSnapshot, service::ServiceSnapshot};
@@ -29,6 +32,8 @@ pub(super) struct ScenarioV1 {
     demand: DemandSpec,
     #[serde(default, skip_serializing_if = "ServiceSpec::is_empty")]
     service: ServiceSpec,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    line_waypoints: BTreeMap<LineId, Vec<Vec<LaneId>>>,
     #[serde(default, skip_serializing_if = "TaxiSpec::is_empty")]
     taxi: TaxiSpec,
     #[serde(default, skip_serializing_if = "LayoutSpec::is_empty")]
@@ -48,6 +53,7 @@ impl ScenarioV1 {
             mut traffic,
             mut demand,
             mut service,
+            line_waypoints,
             mut taxi,
             mut layout,
             mut growth,
@@ -74,6 +80,7 @@ impl ScenarioV1 {
             traffic,
             demand,
             service,
+            line_waypoints,
             taxi,
             layout,
             growth,
@@ -97,6 +104,7 @@ impl ScenarioV1 {
             traffic: self.traffic,
             demand: self.demand,
             service: self.service,
+            line_waypoints: self.line_waypoints,
             taxi: self.taxi,
             layout: self.layout,
             growth: self.growth,

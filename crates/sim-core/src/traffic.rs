@@ -198,10 +198,22 @@ impl RoadState {
         to: LaneId,
     ) -> Option<Vec<LaneId>> {
         let (_, movements) = self.route_for(kind, from, to)?;
+        Some(self.lanes_for_movements(from, &movements))
+    }
+
+    pub(crate) fn lanes_for_movements(
+        &self,
+        from: LaneId,
+        movements: &[MovementId],
+    ) -> Vec<LaneId> {
         let mut lanes = Vec::with_capacity(movements.len() + 1);
         lanes.push(from);
-        lanes.extend(movements.into_iter().map(|id| self.movements[&id].to));
-        Some(lanes)
+        lanes.extend(movements.iter().map(|id| self.movements[id].to));
+        lanes
+    }
+
+    pub(crate) fn movement_target(&self, id: MovementId) -> Option<LaneId> {
+        self.movements.get(&id).map(|movement| movement.to)
     }
 
     /// Free-flow routing through lanes that can accommodate this vehicle.

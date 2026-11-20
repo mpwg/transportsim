@@ -55,6 +55,12 @@ pub enum EditAction {
     UpsertStop(StopSpec),
     RemoveStop(StopId),
     UpsertLine(LineSpec),
+    /// Sets one waypoint list per leg, including the final return to the first stop.
+    /// Empty waypoint lists on every leg clear the line's waypoints.
+    SetLineWaypoints {
+        line: LineId,
+        legs: Vec<Vec<LaneId>>,
+    },
     RemoveLine(LineId),
     UpsertLineVehicle(FleetSpec),
     RemoveLineVehicle(VehicleId),
@@ -361,10 +367,31 @@ impl Draft {
                 });
                 self.affected_lines.insert(line.id);
             }
+            EditAction::SetLineWaypoints { line, legs } => {
+                let spec = self
+                    .scenario
+                    .service
+                    .lines
+                    .iter()
+                    .find(|spec| spec.id == *line)
+                    .ok_or(EditError::MissingLine(*line))?;
+                if !legs.is_empty() && legs.len() != spec.stops.len() {
+                    return Err(EditError::WouldInvalidate(LoadError::State(
+                        ValidationError::Service(crate::ServiceError::InvalidLine(*line)),
+                    )));
+                }
+                if legs.iter().all(Vec::is_empty) {
+                    self.scenario.line_waypoints.remove(line);
+                } else {
+                    self.scenario.line_waypoints.insert(*line, legs.clone());
+                }
+                self.affected_lines.insert(*line);
+            }
             EditAction::RemoveLine(id) => {
                 remove(&mut self.scenario.service.lines, |line| line.id == *id)
                     .ok_or(EditError::MissingLine(*id))?;
                 self.headways.remove(id);
+                self.scenario.line_waypoints.remove(id);
                 self.affected_lines.insert(*id);
             }
             EditAction::UpsertLineVehicle(vehicle) => {
@@ -556,10 +583,11 @@ impl Draft {
 
     fn repair_routes(
         &mut self,
-        previous: &Scenario,
+        previous: &Simulation,
         road: &crate::traffic::RoadState,
-    ) -> RouteChanges {
+    ) -> Result<RouteChanges, EditError> {
         let destinations: BTreeMap<_, _> = previous
+            .scenario
             .movements
             .iter()
             .map(|movement| (movement.id, movement.to))
@@ -594,10 +622,22 @@ impl Draft {
                 let Some(target) = target else {
                     continue;
                 };
-                if item.recovery.is_none()
+                let still_valid = item.recovery.is_none()
                     && item.blocked_destination.is_none()
-                    && road.supports_vehicle_route(lane.id, target, &item.entry, &item.route)
+                    && road.supports_vehicle_route(lane.id, target, &item.entry, &item.route);
+                if item.managed
+                    && let crate::QueueEntry::Vehicle { id, .. } = item.entry
+                    && previous.world.service.active_leg_has_waypoints(id)
+                    && (!still_valid
+                        || item.route.iter().any(|movement| {
+                            road.movement_target(*movement) != destinations.get(movement).copied()
+                        }))
                 {
+                    return Err(EditError::WouldInvalidate(LoadError::InvalidState {
+                        field: "service.active_vehicle_route",
+                    }));
+                }
+                if still_valid {
                     continue;
                 }
                 let units = u64::from(item.entry.units());
@@ -654,7 +694,7 @@ impl Draft {
         if let Some(demand) = &mut self.demand {
             demand.repair_car_paths(&self.scenario.demand, road);
         }
-        changes
+        Ok(changes)
     }
 
     fn finish(
@@ -664,7 +704,7 @@ impl Draft {
         growth: Option<GrowthSnapshot>,
     ) -> Result<PreparedEdit, EditError> {
         self.scenario.layout.sort_tables();
-        let permitted = unchanged_lines(&sim.scenario.service, &self.scenario.service);
+        let permitted = unchanged_lines(&sim.scenario, &self.scenario);
         let mut world = World::from_scenario(self.scenario.clone(), &permitted)
             .map_err(|error| EditError::WouldInvalidate(LoadError::State(error)))?;
         let invalid = EditError::WouldInvalidate;
@@ -676,7 +716,7 @@ impl Draft {
                 self.affected_lines.insert(line.id);
             }
         }
-        let changes = self.repair_routes(&sim.scenario, &world.road);
+        let changes = self.repair_routes(sim, &world.road)?;
         world
             .road
             .restore(tick, self.lanes, self.junctions)
@@ -820,10 +860,7 @@ fn remove<T>(items: &mut Vec<T>, matches: impl Fn(&T) -> bool) -> Option<T> {
     Some(items.remove(index))
 }
 
-fn unchanged_lines(
-    previous: &crate::ServiceSpec,
-    current: &crate::ServiceSpec,
-) -> BTreeSet<LineId> {
+fn unchanged_lines(previous: &Scenario, current: &Scenario) -> BTreeSet<LineId> {
     let stops = |spec: &crate::ServiceSpec| -> BTreeMap<_, _> {
         spec.stops
             .iter()
@@ -837,24 +874,28 @@ fn unchanged_lines(
             .map(|vehicle| vehicle.length_mm)
             .max()
     };
-    let previous_stops = stops(previous);
-    let current_stops = stops(current);
+    let previous_stops = stops(&previous.service);
+    let current_stops = stops(&current.service);
     current
+        .service
         .lines
         .iter()
         .filter(|line| {
             previous
+                .service
                 .lines
                 .iter()
                 .find(|old| old.id == line.id)
                 .is_some_and(|old| {
                     old.kind == line.kind
                         && old.stops == line.stops
+                        && previous.line_waypoints.get(&line.id)
+                            == current.line_waypoints.get(&line.id)
                         && line
                             .stops
                             .iter()
                             .all(|id| previous_stops.get(id) == current_stops.get(id))
-                        && longest(previous, line.id) == longest(current, line.id)
+                        && longest(&previous.service, line.id) == longest(&current.service, line.id)
                 })
         })
         .map(|line| line.id)

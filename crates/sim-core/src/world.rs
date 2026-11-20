@@ -8,9 +8,13 @@ use crate::{
     growth::{Growth, MAX_POPULATION},
     growth_runtime,
 };
+use crate::{LaneId, LineId, QueueEntry, ServiceError, ServiceSpec, service::Service};
 use crate::{LayoutError, LayoutSpec};
-use crate::{LineId, QueueEntry, ServiceError, ServiceSpec, service::Service};
-use std::{collections::BTreeSet, fmt, num::NonZeroU64};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    num::NonZeroU64,
+};
 
 /// Initial conditions supplied by a scenario author.
 #[derive(Clone, Debug)]
@@ -24,6 +28,8 @@ pub struct Scenario {
     pub traffic: Vec<TrafficSeed>,
     pub demand: DemandSpec,
     pub service: ServiceSpec,
+    /// Required lane waypoints by line and leg, with the return trip last.
+    pub line_waypoints: BTreeMap<LineId, Vec<Vec<LaneId>>>,
     pub taxi: TaxiSpec,
     pub layout: LayoutSpec,
     pub growth: GrowthSpec,
@@ -40,6 +46,7 @@ impl Scenario {
             traffic: Vec::new(),
             demand: DemandSpec::default(),
             service: ServiceSpec::default(),
+            line_waypoints: BTreeMap::new(),
             taxi: TaxiSpec::default(),
             layout: LayoutSpec::default(),
             growth: GrowthSpec::default(),
@@ -172,6 +179,7 @@ impl World {
             |id| demand.contains_zone(id),
             |id| seeded_vehicles.contains(&id),
             allowed_disconnected,
+            scenario.line_waypoints,
         )
         .map_err(ValidationError::Service)?;
         let taxi = Taxi::new(scenario.taxi, demand.road_accesses(), &road, |id| {

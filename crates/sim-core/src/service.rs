@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::demand::DemandState;
 use crate::routing::transit::{TimetableLink, TransitCost, TransitPath, itinerary};
+use crate::routing::vehicle_route_through;
 use crate::traffic::RoadState;
 use crate::{
     FootEdgeId, LaneId, LoadError, MovementId, QueueEntry, Tick, VehicleId, VehicleKind, ZoneId,
@@ -141,6 +142,7 @@ fn is_zero(value: &u64) -> bool {
 #[derive(Debug)]
 struct Line {
     spec: LineSpec,
+    waypoints: Vec<Vec<LaneId>>,
     // Each route starts at the corresponding stop. The last is the empty run back.
     routes: Vec<Option<Vec<MovementId>>>,
 }
@@ -280,7 +282,14 @@ impl Service {
         zone_exists: impl Fn(ZoneId) -> bool,
         vehicle_used: impl Fn(VehicleId) -> bool,
     ) -> Result<Self, ServiceError> {
-        Self::new_with_disconnections(spec, road, zone_exists, vehicle_used, &BTreeSet::new())
+        Self::new_with_disconnections(
+            spec,
+            road,
+            zone_exists,
+            vehicle_used,
+            &BTreeSet::new(),
+            BTreeMap::new(),
+        )
     }
 
     pub(crate) fn new_with_disconnections(
@@ -289,6 +298,7 @@ impl Service {
         zone_exists: impl Fn(ZoneId) -> bool,
         vehicle_used: impl Fn(VehicleId) -> bool,
         allowed: &BTreeSet<LineId>,
+        mut waypoints: BTreeMap<LineId, Vec<Vec<LaneId>>>,
     ) -> Result<Self, ServiceError> {
         let mut stops = BTreeMap::new();
         for stop in spec.stops {
@@ -306,6 +316,10 @@ impl Service {
         for line in spec.lines {
             let id = line.id;
             if line.stops.len() < 2 || !matches!(line.kind, VehicleKind::Bus | VehicleKind::Tram) {
+                return Err(ServiceError::InvalidLine(id));
+            }
+            let waypoints = waypoints.remove(&id).unwrap_or_default();
+            if !waypoints.is_empty() && waypoints.len() != line.stops.len() {
                 return Err(ServiceError::InvalidLine(id));
             }
             let largest = spec
@@ -328,11 +342,15 @@ impl Service {
                 if from.lane == to.lane && index + 1 != line.stops.len() {
                     return Err(ServiceError::InvalidLine(id));
                 }
-                let path = if let Some(length) = largest {
-                    road.route_for_length(line.kind, from.lane, to.lane, length)
-                } else {
-                    road.route_for(line.kind, from.lane, to.lane)
-                };
+                let via = waypoints.get(index).map_or(&[][..], Vec::as_slice);
+                let path = vehicle_route_through(
+                    road,
+                    from.lane,
+                    via,
+                    to.lane,
+                    line.kind,
+                    largest.unwrap_or(NonZeroU32::MIN),
+                );
                 if let Some((cost, route)) = path {
                     leg_costs.push(cost - u64::from(road.lane_travel_ticks(from.lane).unwrap()));
                     routes.push(Some(route));
@@ -346,10 +364,23 @@ impl Service {
             if largest.is_some() && !current.disconnected_lines.contains(&id) {
                 links.extend(timetable(&line, &stops, &leg_costs, road));
             }
-            if lines.insert(id, Line { spec: line, routes }).is_some() {
+            if lines
+                .insert(
+                    id,
+                    Line {
+                        spec: line,
+                        waypoints,
+                        routes,
+                    },
+                )
+                .is_some()
+            {
                 return Err(ServiceError::DuplicateLine(id));
             }
             current.lines.insert(id, LineStatus::default());
+        }
+        if let Some((&id, _)) = waypoints.first_key_value() {
+            return Err(ServiceError::InvalidLine(id));
         }
         let mut fleet = BTreeMap::new();
         for vehicle in spec.fleet {
@@ -369,6 +400,32 @@ impl Service {
             current,
             links,
         })
+    }
+
+    pub(crate) fn line_route(&self, line: LineId, road: &RoadState) -> Option<Vec<Vec<LaneId>>> {
+        let line = self.lines.get(&line)?;
+        line.spec
+            .stops
+            .iter()
+            .zip(&line.routes)
+            .map(|(stop, route)| {
+                Some(road.lanes_for_movements(self.stops[stop].lane, route.as_ref()?))
+            })
+            .collect()
+    }
+
+    pub(crate) fn active_leg_has_waypoints(&self, vehicle: VehicleId) -> bool {
+        let Some(fleet) = self.fleet.get(&vehicle) else {
+            return false;
+        };
+        let line = &self.lines[&fleet.line];
+        let leg = match self.current.vehicles[&vehicle] {
+            Progress::Approaching { stop_index, .. } => stop_index.checked_sub(1),
+            Progress::Returning => Some(line.spec.stops.len() - 1),
+            Progress::Idle | Progress::Dwelling { .. } => None,
+        };
+        leg.and_then(|index| line.waypoints.get(index))
+            .is_some_and(|waypoints| !waypoints.is_empty())
     }
 
     pub(crate) fn reconcile(
@@ -412,10 +469,13 @@ impl Service {
             if self.fleet.get(&id) != Some(old) {
                 return Err(invalid);
             }
-            let before = &previous.lines[&old.line].spec;
-            let after = &self.lines[&old.line].spec;
+            let before_line = &previous.lines[&old.line];
+            let after_line = &self.lines[&old.line];
+            let before = &before_line.spec;
+            let after = &after_line.spec;
             if before.kind != after.kind
                 || before.stops != after.stops
+                || before_line.waypoints != after_line.waypoints
                 || before.stops.iter().any(|stop| {
                     let old = &previous.stops[stop];
                     let new = &self.stops[stop];
@@ -1135,6 +1195,7 @@ mod tests {
             |_| true,
             |_| false,
             &std::collections::BTreeSet::from([id]),
+            BTreeMap::new(),
         )
         .unwrap();
         let snapshot = service.snapshot().unwrap();
@@ -1165,6 +1226,7 @@ mod tests {
             |_| true,
             |_| false,
             &std::collections::BTreeSet::from([LineId::new(1), LineId::new(2)]),
+            BTreeMap::new(),
         )
         .unwrap();
         edited.reconcile(&service, tick, &road).unwrap();
@@ -1196,6 +1258,7 @@ mod tests {
             |_| true,
             |_| false,
             &BTreeSet::from([LineId::new(1), LineId::new(2)]),
+            BTreeMap::new(),
         )
         .unwrap();
         edited.reconcile(&service, tick, &road).unwrap();
@@ -1229,6 +1292,7 @@ mod tests {
             |_| true,
             |_| false,
             &BTreeSet::from([LineId::new(1), LineId::new(2)]),
+            BTreeMap::new(),
         )
         .unwrap();
         edited.reconcile(&service, tick, &road).unwrap();

@@ -1,9 +1,10 @@
 use std::num::NonZeroU32;
 
 use sim_core::{
-    DischargeRate, FleetSpec, JunctionId, JunctionSpec, LaneId, LaneSpec, LineId, LineSpec,
-    MovementId, MovementSpec, Observation, Query, QueueEntry, RuleSet, Scenario, ServiceSpec,
-    Simulation, StopId, StopSpec, Tick, TrafficSeed, VehicleId, VehicleKind, ZoneId, ZoneSpec,
+    Command, DischargeRate, EditAction, EditCommand, FleetSpec, JunctionId, JunctionSpec, LaneId,
+    LaneSpec, LineId, LineSpec, MovementId, MovementSpec, Observation, Query, QueueEntry, RuleSet,
+    Scenario, ServiceSpec, Simulation, StopId, StopSpec, Tick, TrafficSeed, VehicleId, VehicleKind,
+    ZoneId, ZoneSpec,
 };
 
 fn nz(n: u32) -> NonZeroU32 {
@@ -92,6 +93,159 @@ fn service(sim: &Simulation) -> sim_core::ServiceObservation {
         panic!("expected service");
     };
     view
+}
+
+fn waypoint_scenario(capacity: u32) -> Scenario {
+    let mut spec = scenario(true);
+    let mut waypoint = spec.lanes[0].clone();
+    waypoint.id = LaneId::new(3);
+    waypoint.capacity_mm = nz(capacity);
+    waypoint.travel_ticks = nz(5);
+    spec.lanes.push(waypoint);
+    spec.movements
+        .extend([(3, 1, 3), (4, 3, 2)].map(|(id, from, to)| MovementSpec {
+            id: MovementId::new(id),
+            from: LaneId::new(from),
+            to: LaneId::new(to),
+            ..spec.movements[0].clone()
+        }));
+    spec
+}
+
+fn set_waypoint(sim: &Simulation, waypoint: u64) -> EditCommand {
+    EditCommand {
+        expected_revision: sim.network_revision(),
+        actions: vec![EditAction::SetLineWaypoints {
+            line: LineId::new(1),
+            legs: vec![vec![LaneId::new(waypoint)], vec![]],
+        }],
+    }
+}
+
+#[test]
+fn line_route_preview_matches_waypoint_route_after_save_and_load() {
+    let mut sim = Simulation::new_game(waypoint_scenario(30_000), RuleSet::default(), 42).unwrap();
+    let before = sim.fingerprint().unwrap();
+    let waypoint = set_waypoint(&sim, 3);
+    let lane_id = LaneId::new;
+    let through = vec![lane_id(1), lane_id(3), lane_id(2)];
+    assert_eq!(
+        sim.preview_vehicle_route_through(&through, VehicleKind::Bus, nz(12_000)),
+        Some(through.clone())
+    );
+    assert_eq!(
+        sim.preview_line_route(&waypoint, LineId::new(1)).unwrap(),
+        Some(vec![through, vec![lane_id(2), lane_id(1)]])
+    );
+    assert_eq!(sim.fingerprint().unwrap(), before);
+
+    sim.apply(Command::CommitEdit(waypoint)).unwrap();
+    let mut loaded = Simulation::load(&sim.save().unwrap()).unwrap();
+    assert_eq!(loaded.fingerprint().unwrap(), sim.fingerprint().unwrap());
+    let Observation::TimetableJourney(Some(itinerary)) = loaded
+        .inspect(Query::TimetableJourney {
+            from: ZoneId::new(1),
+            to: ZoneId::new(2),
+        })
+        .unwrap()
+    else {
+        panic!("expected a timetable journey");
+    };
+    assert_eq!(itinerary.cost.ride_ticks, 6);
+    loaded.advance(6).unwrap();
+    sim.advance(6).unwrap();
+    assert_eq!(loaded.fingerprint().unwrap(), sim.fingerprint().unwrap());
+    assert_eq!(lane(&loaded, 3).vehicles[0].id, VehicleId::new(12));
+    assert!(lane(&loaded, 2).vehicles.is_empty());
+}
+
+#[test]
+fn line_waypoint_must_exist_and_fit_the_longest_vehicle() {
+    let sim = Simulation::new_game(waypoint_scenario(9_000), RuleSet::default(), 42).unwrap();
+    assert_eq!(
+        sim.preview_vehicle_route_through(
+            &[LaneId::new(1), LaneId::new(3), LaneId::new(2)],
+            VehicleKind::Bus,
+            nz(12_000)
+        ),
+        None,
+    );
+    for invalid in [3, 99] {
+        let error = sim
+            .preview_line_route(&set_waypoint(&sim, invalid), LineId::new(1))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            sim_core::EditError::WouldInvalidate(sim_core::LoadError::State(
+                sim_core::ValidationError::Service(sim_core::ServiceError::InvalidLine(line))
+            )) if line == LineId::new(1)
+        ));
+    }
+}
+
+#[test]
+fn closing_a_waypoint_cannot_divert_a_bus_that_already_started_its_leg() {
+    let mut spec = waypoint_scenario(30_000);
+    spec.junctions[0].phases.push(sim_core::SignalPhase {
+        green_ticks: nz(100),
+        clearance_ticks: 0,
+        movements: vec![MovementId::new(1)],
+    });
+    let mut sim = Simulation::new_game(spec, RuleSet::default(), 42).unwrap();
+    sim.apply(Command::CommitEdit(set_waypoint(&sim, 3)))
+        .unwrap();
+    sim.advance(6).unwrap();
+    assert_eq!(lane(&sim, 1).vehicles[0].id, VehicleId::new(12));
+    assert_eq!(service(&sim).vehicles[0].next_stop, Some(StopId::new(2)));
+    let close = EditCommand {
+        expected_revision: sim.network_revision(),
+        actions: vec![EditAction::RemoveMovement(MovementId::new(3))],
+    };
+    let before = sim.fingerprint().unwrap();
+    assert!(matches!(
+        sim.apply(Command::CommitEdit(close)),
+        Err(sim_core::CommandError::Edit(
+            sim_core::EditError::WouldInvalidate(sim_core::LoadError::InvalidState {
+                field: "service.active_vehicle_route"
+            })
+        ))
+    ));
+    assert_eq!(sim.fingerprint().unwrap(), before);
+}
+
+#[test]
+fn an_idle_line_keeps_its_waypoint_after_the_road_is_closed_and_reopened() {
+    let spec = waypoint_scenario(30_000);
+    let closed = spec.movements[2].clone();
+    let mut sim = Simulation::new_game(spec, RuleSet::default(), 42).unwrap();
+    let save = sim.save().unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&save).unwrap();
+    let scenario = json["payload"]["scenario"].as_object().unwrap();
+    assert!(!scenario.contains_key("line_waypoints"));
+
+    sim.apply(Command::CommitEdit(set_waypoint(&sim, 3)))
+        .unwrap();
+    let close = EditCommand {
+        expected_revision: sim.network_revision(),
+        actions: vec![EditAction::RemoveMovement(closed.id)],
+    };
+    sim.apply(Command::CommitEdit(close)).unwrap();
+    let mut loaded = Simulation::load(&sim.save().unwrap()).unwrap();
+    assert!(service(&loaded).lines[0].disconnected);
+
+    let reopen = EditCommand {
+        expected_revision: loaded.network_revision(),
+        actions: vec![EditAction::UpsertMovement(closed)],
+    };
+    assert_eq!(
+        loaded.preview_line_route(&reopen, LineId::new(1)).unwrap(),
+        Some(vec![
+            [1, 3, 2].map(LaneId::new).into(),
+            [2, 1].map(LaneId::new).into()
+        ])
+    );
+    loaded.apply(Command::CommitEdit(reopen)).unwrap();
+    assert!(!service(&loaded).lines[0].disconnected);
 }
 
 #[test]

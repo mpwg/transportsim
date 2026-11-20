@@ -1,8 +1,13 @@
 pub(crate) mod transit;
 
+use std::num::NonZeroU32;
+
 use serde::{Deserialize, Serialize};
 
-use crate::{FootEdgeId, LaneId, MovementId, Simulation, VehicleKind};
+use crate::traffic::RoadState;
+use crate::{
+    EditCommand, EditError, FootEdgeId, LaneId, LineId, MovementId, Simulation, VehicleKind,
+};
 
 impl Simulation {
     /// Returns the fastest free-flow route for `kind`, including both endpoint lanes.
@@ -16,6 +21,58 @@ impl Simulation {
     ) -> Option<Vec<LaneId>> {
         self.world.road.route_lanes(kind, from, to)
     }
+
+    /// Routes through the specified lanes in order for a vehicle of the given length.
+    /// An empty list or an unreachable section returns `None`.
+    pub fn preview_vehicle_route_through(
+        &self,
+        lanes: &[LaneId],
+        kind: VehicleKind,
+        length_mm: NonZeroU32,
+    ) -> Option<Vec<LaneId>> {
+        let (&from, rest) = lanes.split_first()?;
+        let (to, waypoints) = rest.split_last().unwrap_or((&from, &[]));
+        let road = &self.world.road;
+        let (_, movements) = vehicle_route_through(road, from, waypoints, *to, kind, length_mm)?;
+        Some(road.lanes_for_movements(from, &movements))
+    }
+
+    /// Validates an edit and returns the resulting route of a connected line.
+    /// Each leg includes its starting and ending lane. The last leg returns to the origin.
+    pub fn preview_line_route(
+        &self,
+        edit: &EditCommand,
+        line: LineId,
+    ) -> Result<Option<Vec<Vec<LaneId>>>, EditError> {
+        let prepared = crate::edit::prepare(self, edit)?;
+        Ok(prepared
+            .world
+            .service
+            .line_route(line, &prepared.world.road))
+    }
+}
+
+pub(crate) fn vehicle_route_through(
+    road: &RoadState,
+    mut from: LaneId,
+    waypoints: &[LaneId],
+    to: LaneId,
+    kind: VehicleKind,
+    length_mm: NonZeroU32,
+) -> Option<(u64, Vec<MovementId>)> {
+    if waypoints.is_empty() {
+        return road.route_for_length(kind, from, to, length_mm);
+    }
+    let mut ticks = u64::from(road.lane_travel_ticks(from)?);
+    let mut route = Vec::new();
+    for target in waypoints.iter().copied().chain(std::iter::once(to)) {
+        let (leg_ticks, movements) = road.route_for_length(kind, from, target, length_mm)?;
+        let overlap = u64::from(road.lane_travel_ticks(from)?);
+        ticks = ticks.checked_add(leg_ticks - overlap)?;
+        route.extend(movements);
+        from = target;
+    }
+    Some((ticks, route))
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
