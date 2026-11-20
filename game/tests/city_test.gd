@@ -97,13 +97,76 @@ func _run() -> void:
 		city.show_traffic(traffic, 1.0)
 		_expect(red_color.r > red.material_override.albedo_color.r, "Der Ampelwechsel wird dargestellt.")
 
+	_test_walkers(city)
+	_test_boarding(city)
+
 	city.build({}, [], [])
 	_expect(city.get_node("Vehicles").get_child_count() == 0, "Ein neues Layout verwirft den sichtbaren Verkehr.")
 	_expect(city.lane_at(forward) == -1, "Ein neues Layout verwirft die alten Wege.")
 	city.free()
 	if not _failed:
-		print("Modellstadt geprüft: Wege, Halte, Fahrzeuge, Wartende und Layoutwechsel")
+		print("Modellstadt geprüft: Wege, Halte, Fahrzeuge, Gehgruppen, Einsteigen und Layoutwechsel")
 	quit(1 if _failed else 0)
+
+
+func _test_walkers(city: Node3D) -> void:
+	var street_start := Vector3(0, 0.08, 3)
+	var street_end := Vector3(8, 0.08, 3)
+	var edge := {"edge": 12, "from": street_start, "to": street_end, "groups": [
+		{"people": 80, "progress": 0.1}, {"people": 1, "progress": 0.9},
+	]}
+	city.show_traffic({"tick": 93, "walkers": [edge]}, 1.0)
+	var lane := city.get_node_or_null("Walkers/Edge12")
+	_expect(lane != null, "Gehgruppen haben eine sichtbare Position auf ihrer Fußkante.")
+	if lane == null:
+		return
+	_expect(lane.get_child_count() == 2, "Einzelpersonen und größere Gruppen sind sichtbar.")
+	var group := lane.get_child(0) as Node3D
+	var single := lane.get_child(1) as Node3D
+	_expect(group.get_child_count() == 3 and single.get_child_count() == 1,
+		"Eine große Gehgruppe hat eine begrenzte Zahl sichtbarer Personen.")
+	var person := group.get_child(0)
+	_expect(group.position.is_equal_approx(street_start.lerp(street_end, 0.1)),
+		"Der Fortschritt entspricht der Position auf der Fußkante.")
+	edge.groups = [{"people": 80, "progress": 0.6}]
+	city.show_traffic({"tick": 94, "walkers": [edge]}, 0.5)
+	_expect(lane.get_child_count() == 1 and lane.get_child(0) == group and group.get_child(0) == person,
+		"Ankommende Gruppen werden entfernt und weitergehende Personen behalten ihr Modell.")
+	_expect(group.position.is_equal_approx(street_start.lerp(street_end, 0.35)),
+		"Die Personen gehen zwischen zwei Stichproben sichtbar weiter.")
+	city.show_traffic({"tick": 95}, 1.0)
+	_expect(city.get_node_or_null("Walkers/Edge12") == null, "Leere Fußkanten behalten keine Personen.")
+
+
+func _test_boarding(city: Node3D) -> void:
+	var vehicle := {"id": 70, "kind": "bus", "progress": 0.3625}
+	var lanes := [{"id": 6, "vehicles": [vehicle]}]
+	var stops := [{"id": 1, "lane": 6, "waiting": 4}]
+	city.show_traffic({"tick": 96, "lanes": lanes, "stops": stops}, 1.0)
+	var crowd := city.get_node("Stops/Stop1/Crowd")
+	var boarding_person := crowd.get_child(3) as Node3D
+	var started := boarding_person.global_position
+	stops[0].waiting = 2
+	var boarding_snapshot := {"tick": 97, "lanes": lanes, "stops": stops}
+	city.show_traffic(boarding_snapshot, 0.5)
+	var boarding := city.get_node_or_null("Boarding")
+	_expect(boarding != null and boarding.get_child_count() == 2 and crowd.get_child_count() == 2,
+		"Die zwei einsteigenden Personen verlassen die wartende Gruppe.")
+	if boarding == null:
+		return
+	_expect(boarding_person.get_parent() == boarding, "Die wartende Figur geht selbst zum Bus.")
+	var bus := city.get_node("Vehicles/Vehicle70") as Node3D
+	_expect(boarding_person.global_position.distance_to(bus.global_position) < started.distance_to(bus.global_position),
+		"Einsteigende Personen bewegen sich zum haltenden Bus.")
+	city.show_traffic(boarding_snapshot, 1.0)
+	_expect(boarding.get_child_count() == 0, "Nach dem Einstieg bleiben keine Personen auf der Straße.")
+	stops[0].waiting = 40
+	city.show_traffic({"tick": 98, "lanes": lanes, "stops": stops}, 1.0)
+	var full := crowd.get_child_count()
+	stops[0].waiting = 39
+	city.show_traffic({"tick": 99, "lanes": lanes, "stops": stops}, 0.5)
+	_expect(boarding.get_child_count() == 1 and crowd.get_child_count() == full,
+		"Einsteigende sind auch bei einer weiterhin vollen Haltestelle sichtbar.")
 
 
 func _expect(condition: bool, message: String) -> void:

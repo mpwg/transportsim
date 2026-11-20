@@ -6,6 +6,9 @@ const ROAD_LEVEL := 0.0
 const LAND_LEVEL := -0.08
 const PICK_RADIUS := 2.75
 const CROWD_LIMIT := 24
+const WALKER_GROUPS_PER_EDGE := 6
+const WALKERS_PER_GROUP := 3
+const BOARDING_LIMIT := 5
 const ASPHALT := Color("#575a57")
 const TRACK_BED := Color("#77786b")
 const PAVING := Color("#cec2a8")
@@ -34,6 +37,9 @@ var _stop_nodes: Dictionary = {}
 var _signal_nodes: Dictionary = {}
 var _signal_materials: Dictionary = {}
 var _vehicle_states: Dictionary = {}
+var _walking_edges: Dictionary = {}
+var _boarders: Array[Dictionary] = []
+var _next_walk_group := 0
 var _materials: Dictionary = {}
 var _batches: Dictionary = {}
 var _primitives: Dictionary = {}
@@ -44,6 +50,8 @@ var _static_root: Node3D
 var _vehicle_root: Node3D
 var _stop_root: Node3D
 var _signal_root: Node3D
+var _walking_root: Node3D
+var _boarding_root: Node3D
 
 
 func build(layout: Dictionary, lanes: Array, stops: Array) -> void:
@@ -59,6 +67,9 @@ func build(layout: Dictionary, lanes: Array, stops: Array) -> void:
 	_stop_nodes.clear()
 	_signal_nodes.clear()
 	_vehicle_states.clear()
+	_walking_edges.clear()
+	_boarders.clear()
+	_next_walk_group = 0
 	_last_snapshot = {}
 	_last_tick = null
 	_last_blend = 1.0
@@ -66,6 +77,8 @@ func build(layout: Dictionary, lanes: Array, stops: Array) -> void:
 	_vehicle_root = _group(self, "Vehicles")
 	_stop_root = _group(self, "Stops")
 	_signal_root = _group(self, "Signals")
+	_walking_root = _group(self, "Walkers")
+	_boarding_root = _group(self, "Boarding")
 
 	for lane in lanes:
 		var allowed: Array = lane.get("allowed", [])
@@ -133,6 +146,8 @@ func show_traffic(snapshot: Dictionary, blend: float) -> void:
 	var new_snapshot: bool = changed or tick != _last_tick or blend < _last_blend
 	if new_snapshot:
 		_sync_vehicles(snapshot.get("lanes", []), float(snapshot.get("tick", 0)))
+		_sync_walkers(snapshot.get("walkers", []))
+		_clear_boarders()
 		_sync_crowds(snapshot.get("stops", []))
 		_sync_signals(snapshot.get("signals", []))
 		_last_snapshot = snapshot.duplicate(true) if tick == null else snapshot
@@ -142,6 +157,8 @@ func show_traffic(snapshot: Dictionary, blend: float) -> void:
 		var node: Node3D = state.node
 		node.position = state.from.lerp(state.to, blend)
 		node.rotation.y = lerp_angle(state.from_heading, state.to_heading, blend)
+	_animate_walkers(blend)
+	_animate_boarders(blend)
 
 
 func _cell(spec: Dictionary) -> Vector2i:
@@ -557,7 +574,7 @@ func _draw_stops(stops: Array) -> void:
 			_part(node, Vector3(-0.42, 0.87, 1.53), Vector3(0.075, 1.75, 0.075), METAL)
 			_part(node, Vector3(-0.42, 1.58, 1.53), Vector3(0.13, 0.37, 0.37), accent)
 			_part(node, Vector3(-0.42, 1.58, 1.53), Vector3(0.15, 0.16, 0.16), Color("#f4e9ce"))
-			_stop_nodes[int(stop.id)] = {"node": node, "crowd": _group(node, "Crowd")}
+			_stop_nodes[int(stop.id)] = {"node": node, "crowd": _group(node, "Crowd"), "lane": lane}
 
 
 func _sync_signals(signals: Array) -> void:
@@ -617,6 +634,91 @@ func _signal_material(color: Color, active: bool) -> StandardMaterial3D:
 	return _signal_materials[color]
 
 
+func _sync_walkers(edges: Array) -> void:
+	var present := {}
+	for entry in edges:
+		var id := int(entry.edge)
+		var start: Vector3 = entry.from
+		var end: Vector3 = entry.to
+		var reported: Array = entry.groups.filter(func(group: Dictionary) -> bool:
+			return int(group.people) > 0)
+		if reported.is_empty() or start.is_equal_approx(end):
+			continue
+		reported.sort_custom(func(first: Dictionary, second: Dictionary) -> bool:
+			return float(first.progress) < float(second.progress))
+		present[id] = true
+		if not _walking_edges.has(id):
+			_walking_edges[id] = {"node": _group(_walking_root, "Edge%d" % id), "groups": []}
+
+		var edge: Dictionary = _walking_edges[id]
+		var edge_node: Node3D = edge.node
+		edge.start = start
+		var direction := (end - start).normalized()
+		var previous: Array = edge.groups
+		var current: Array[Dictionary] = []
+		var shown := mini(reported.size(), WALKER_GROUPS_PER_EDGE)
+		for index in range(shown):
+			# Sample across the edge to keep both arrivals and new walkers visible in busy periods.
+			var sample := roundi(index * (reported.size() - 1.0) / (shown - 1.0)) if shown > 1 else 0
+			var report: Dictionary = reported[sample]
+			var progress := clampf(float(report.progress), 0.0, 1.0)
+			var continuity := _match_walking_group(previous, progress)
+			var position := start.lerp(end, progress)
+			var state: Dictionary
+			if continuity >= 0:
+				state = previous.pop_at(continuity)
+			else:
+				var node := _group(edge_node, "Group%d" % _next_walk_group)
+				_next_walk_group += 1
+				node.position = position
+				state = {"node": node, "seed": _next_walk_group + id}
+			var group: Node3D = state.node
+			group.rotation.y = _heading(direction)
+			_resize_walking_group(group, mini(int(report.people), WALKERS_PER_GROUP), state.seed)
+			state.from = group.position
+			state.to = position
+			state.progress = progress
+			current.append(state)
+		for state in previous:
+			_remove_visual(state.node)
+		edge.groups = current
+
+	for id in _walking_edges.keys():
+		if not present.has(id):
+			_remove_visual(_walking_edges[id].node)
+			_walking_edges.erase(id)
+
+
+func _match_walking_group(previous: Array, progress: float) -> int:
+	var match_index := -1
+	var shortest := INF
+	for index in range(previous.size()):
+		var advance := progress - float(previous[index].progress)
+		if advance >= -0.00001 and advance < shortest:
+			match_index = index
+			shortest = advance
+	return match_index
+
+
+func _resize_walking_group(group: Node3D, count: int, seed: int) -> void:
+	while group.get_child_count() > count:
+		_remove_visual(group.get_child(group.get_child_count() - 1))
+	while group.get_child_count() < count:
+		var index := group.get_child_count()
+		var person := _person_model(group, index, seed)
+		person.position = Vector3(0.25 * sin(float(index) * 1.85 + seed), 0, -0.32 * index)
+
+
+func _animate_walkers(blend: float) -> void:
+	for edge in _walking_edges.values():
+		for state in edge.groups:
+			var group: Node3D = state.node
+			group.position = state.from.lerp(state.to, blend)
+			var travelled := group.position.distance_to(edge.start)
+			for person in group.get_children():
+				_pose_walker(person, travelled + float(person.get_index()) * 0.13)
+
+
 func _sync_crowds(stops: Array) -> void:
 	var waiting_by_stop := {}
 	for entry in stops:
@@ -626,28 +728,94 @@ func _sync_crowds(stops: Array) -> void:
 		var stop: Dictionary = _stop_nodes[id]
 		var crowd: Node3D = stop.crowd
 		var shown := mini(count, CROWD_LIMIT)
+		var departed := int(stop.get("waiting", count)) - count
+		stop.waiting = count
+		if departed > 0:
+			_start_boarding(stop, mini(departed, mini(crowd.get_child_count(), BOARDING_LIMIT)))
 		while crowd.get_child_count() > shown:
-			var person := crowd.get_child(crowd.get_child_count() - 1)
-			crowd.remove_child(person)
-			person.queue_free()
+			_remove_visual(crowd.get_child(crowd.get_child_count() - 1))
 		while crowd.get_child_count() < shown:
 			var index := crowd.get_child_count()
-			_person(crowd, index, int(id))
+			var person := _person_model(crowd, index, int(id))
+			var row := int(index / 8.0)
+			var column := index % 8
+			var shift := 0.055 * sin(float(index * 7 + id))
+			person.position = Vector3(0.44 - row * 0.32 + shift, 0.10, (column - 3.5) * 0.39 + shift)
+			person.rotation.y = sin(float(index * 2 + id)) * 0.65
 
 
-func _person(crowd: Node3D, index: int, id: int) -> void:
-	var person := _group(crowd, "Person%d" % index)
-	var row := int(index / 8.0)
-	var column := index % 8
-	var shift := 0.055 * sin(float(index * 7 + id))
-	person.position = Vector3(0.44 - row * 0.32 + shift, 0.10, (column - 3.5) * 0.39 + shift)
-	person.rotation.y = sin(float(index * 2 + id)) * 0.65
-	person.scale = Vector3.ONE * (0.91 + 0.18 * absf(cos(float(index * 5 + id))))
-	var coat: Color = COATS[(index + id) % COATS.size()]
+func _start_boarding(stop: Dictionary, count: int) -> void:
+	var shelter: Node3D = stop.node
+	var best_distance := 3.35
+	var target := Vector3.ZERO
+	var found := false
+	for state in _vehicle_states.values():
+		if state.lane != stop.lane or not state.kind in ["bus", "tram"]:
+			continue
+		var position: Vector3 = state.to
+		if position.distance_to(state.from) > 0.32:
+			continue
+		var distance := position.distance_to(shelter.position)
+		if distance >= best_distance:
+			continue
+		var direction := Vector3(sin(state.to_heading), 0, cos(state.to_heading))
+		var size := _vehicle_size(state.kind)
+		target = position + direction * size.z * 0.24 + direction.cross(Vector3.UP) * size.x * 0.53
+		target.y += 0.07
+		best_distance = distance
+		found = true
+	if not found:
+		return
+	var crowd: Node3D = stop.crowd
+	for index in range(count):
+		var person := crowd.get_child(crowd.get_child_count() - 1) as Node3D
+		person.reparent(_boarding_root)
+		var start := person.position
+		person.rotation.y = _heading((target - start).normalized())
+		_boarders.append({"node": person, "from": start, "to": target, "delay": index * 0.045})
+
+
+func _animate_boarders(blend: float) -> void:
+	if blend >= 1.0:
+		_clear_boarders()
+		return
+	for state in _boarders:
+		var person: Node3D = state.node
+		var progress := inverse_lerp(float(state.delay), 1.0, maxf(blend, state.delay))
+		person.position = state.from.lerp(state.to, progress)
+		_pose_walker(person, person.position.distance_to(state.from))
+
+
+func _clear_boarders() -> void:
+	for state in _boarders:
+		_remove_visual(state.node)
+	_boarders.clear()
+
+
+func _pose_walker(person: Node3D, travelled: float) -> void:
+	var stride := sin(travelled * TAU / 0.72) * 0.49
+	var left := person.get_node("LeftLeg") as Node3D
+	var right := person.get_node("RightLeg") as Node3D
+	left.rotation.x = stride
+	right.rotation.x = -stride
+
+
+func _remove_visual(node: Node) -> void:
+	node.get_parent().remove_child(node)
+	node.queue_free()
+
+
+func _person_model(parent: Node3D, index: int, seed: int) -> Node3D:
+	var person := _group(parent, "Person%d" % index)
+	person.scale = Vector3.ONE * (0.91 + 0.18 * absf(cos(float(index * 5 + seed))))
+	var coat: Color = COATS[posmod(index + seed, COATS.size())]
 	_part(person, Vector3(0, 0.35, 0), Vector3(0.20, 0.29, 0.22), coat)
 	_part(person, Vector3(0, 0.56, 0), Vector3(0.15, 0.16, 0.15), Color("#d7ac8b"), "sphere")
-	for side in [-1.0, 1.0]:
-		_part(person, Vector3(0, 0.13, 0.057 * side), Vector3(0.11, 0.26, 0.081), METAL)
+	var left := _part(person, Vector3(-0.057, 0.13, 0), Vector3(0.081, 0.26, 0.11), METAL)
+	var right := _part(person, Vector3(0.057, 0.13, 0), Vector3(0.081, 0.26, 0.11), METAL)
+	left.name = "LeftLeg"
+	right.name = "RightLeg"
+	return person
 
 
 func _sync_vehicles(lanes: Array, tick: float) -> void:
@@ -683,6 +851,8 @@ func _sync_vehicles(lanes: Array, tick: float) -> void:
 				node.position = position
 				node.rotation.y = heading
 			state.progress = entry.progress
+			state.kind = kind
+			state.lane = lane
 			state.from = node.position
 			state.to = position
 			state.from_heading = node.rotation.y
