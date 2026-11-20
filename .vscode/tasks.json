@@ -1,0 +1,46 @@
+{
+  "version": "2.0.0",
+  "options": {
+    "cwd": "${workspaceFolder}"
+  },
+  "tasks": [
+    {
+      "label": "Rust-Simulationskern bauen",
+      "type": "process",
+      "command": "cargo",
+      "args": ["build", "--locked", "-p", "sim-godot", "--target-dir", "target"],
+      "hide": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Godot-Bibliothek bereitstellen",
+      "type": "process",
+      "command": "install",
+      "args": [
+        "-D",
+        "target/debug/libsim_godot.so",
+        "game/native/libsim_godot.so"
+      ],
+      "hide": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Brückenstadt starten",
+      "type": "process",
+      "command": "godot",
+      "args": ["--path", "game"],
+      "options": {
+        "env": {
+          "PATH": "${userHome}/.local/bin:${env:PATH}"
+        }
+      },
+      "dependsOn": ["Rust-Simulationskern bauen", "Godot-Bibliothek bereitstellen"],
+      "dependsOrder": "sequence",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}

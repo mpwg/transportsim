@@ -1,6 +1,14 @@
 # Brückenstadt starten
 
-Benötigt Godot 4.6 und Rust unter Linux x86-64. Führe die Befehle aus dem Projektstamm aus.
+Benötigt Godot 4.6 und Rust unter Linux x86-64.
+
+## In VS Code
+
+Öffne den Projektstamm `transportsim` und drücke **Strg+Umschalt+B**. Alternativ wählst du **Brückenstadt starten** im Menü **Terminal → Aufgabe ausführen**. Die Aufgabe baut die Rust-Erweiterung, stellt sie für Godot bereit und öffnet das Spiel. Godot muss als `godot` im Suchpfad oder unter `~/.local/bin/godot` verfügbar sein.
+
+## Im Terminal
+
+Führe die Befehle aus dem Projektstamm aus.
 
 ```sh
 cargo build --locked -p sim-godot
