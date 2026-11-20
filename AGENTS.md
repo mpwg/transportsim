@@ -1,6 +1,5 @@
 # Arbeitsweise in transportsim
 
-- Verwende deutsche Umlaute.
 - Arbeite auf `main` und committe regelmäßig in überprüften, zusammengehörigen Schritten.
 - Nutze `delegate-work-efficiently` für Recherche und Planung sowie `delegate-coding-efficiently` für die Umsetzung. Delegiere unabhängig prüfbare Pakete, wenn der Nutzen den Abstimmungsaufwand rechtfertigt.
 - Nutze `game-design`, `pc-games` und `3d-games` für die Spieloberfläche.
