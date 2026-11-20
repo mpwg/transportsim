@@ -14,12 +14,27 @@ var time_buffer := 0.0
 var snapshot: Dictionary
 var world: Dictionary
 var status: Label
+var guide_title: Label
+var guide_text: Label
+var guide_action: Button
+var guide_card: PanelContainer
+var guide_action_handler: Callable
+var line_button: Button
+var waiting_button: Button
+var journeys_button: Button
+var waypoint_button: Button
+var stop_markers := {}
+var selection_mark: Node3D
+var explore_press := Vector2.ZERO
+var explore_dragging := false
+var explore_pressed := false
 var marker_layer := Node3D.new()
 var shows_waiting := false
 var selected_lane := -1
 var taught_street := false
 var taught_stop := false
 var shows_journeys := false
+var has_journey_flows := false
 var routes := {}
 var waiting_markers := {}
 var line_panel: HBoxContainer
@@ -59,6 +74,7 @@ func _ready() -> void:
 	add_child(marker_layer)
 	city.build(world.layout, world.lanes, world.stops)
 	_refresh_snapshot()
+	_show_explore()
 
 func is_playable() -> bool:
 	return not world.is_empty() and is_instance_valid(city) and city.is_inside_tree()
@@ -89,6 +105,7 @@ func _make_environment() -> void:
 func _make_toolbar() -> void:
 	var layer := CanvasLayer.new()
 	add_child(layer)
+	_make_guide(layer)
 	var margin := MarginContainer.new()
 	layer.add_child(margin)
 	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -106,33 +123,43 @@ func _make_toolbar() -> void:
 	status.add_theme_constant_override("outline_size", 5)
 	status.add_theme_color_override("font_outline_color", Color("#17251d"))
 	bar.add_child(status)
+	var dock := PanelContainer.new()
+	dock.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	dock.add_theme_stylebox_override("panel", _card_style())
+	bar.add_child(dock)
+	var dock_rows := VBoxContainer.new()
+	dock_rows.add_theme_constant_override("separation", 9)
+	dock.add_child(dock_rows)
 	var tools := HBoxContainer.new()
 	tools.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	tools.add_theme_constant_override("separation", 8)
-	bar.add_child(tools)
+	dock_rows.add_child(tools)
 	line_panel = HBoxContainer.new()
 	line_panel.add_theme_constant_override("separation", 8)
-	bar.add_child(line_panel)
+	dock_rows.add_child(line_panel)
 	line_panel.hide()
 	line_selector = OptionButton.new()
 	line_selector.add_item("Neue Linie", 0)
 	line_selector.item_selected.connect(_select_line)
 	line_panel.add_child(line_selector)
-	var remove_waypoint := Button.new()
-	remove_waypoint.text = "Letzten Wegpunkt entfernen"
-	remove_waypoint.pressed.connect(_undo_waypoint)
-	line_panel.add_child(remove_waypoint)
+	waypoint_button = Button.new()
+	waypoint_button.text = "Wegpunkt entfernen"
+	waypoint_button.tooltip_text = "Entfernt den zuletzt gesetzten Wegpunkt."
+	waypoint_button.pressed.connect(_undo_waypoint)
+	line_panel.add_child(waypoint_button)
+	waypoint_button.hide()
 	mode = OptionButton.new()
 	mode.add_item("Bus")
 	mode.add_item("Straßenbahn")
 	mode.item_selected.connect(func(_which: int) -> void:
 		_clear_draft()
-		status.text = "Wähle einen passenden Halt auf der Karte.")
+		_update_stop_targets())
 	line_panel.add_child(mode)
 	var label := Label.new()
-	label.text = "Takt (Minuten)"
+	label.text = "Abfahrt alle"
 	line_panel.add_child(label)
 	interval = SpinBox.new()
+	interval.suffix = "Min."
 	interval.min_value = 1
 	interval.max_value = 60
 	interval.value = 5
@@ -142,14 +169,101 @@ func _make_toolbar() -> void:
 	launch_button.text = "Linie starten"
 	launch_button.pressed.connect(_start_line)
 	line_panel.add_child(launch_button)
-	_toggle_button(tools, "Linie bauen", _set_drafting)
+	line_button = _toggle_button(tools, "Linie bauen", _set_drafting)
+	line_button.tooltip_text = "Haltestellen setzen, Fahrweg prüfen und Takt wählen."
+	line_button.add_theme_color_override("font_color", Color("#cbead3"))
+	journeys_button = _toggle_button(tools, "Autowege", _set_journeys)
+	journeys_button.tooltip_text = "Zeigt Herkunft und Ziele der Autos auf einer ausgewählten Straße."
+	waiting_button = _toggle_button(tools, "Wartende", _set_waiting)
+	waiting_button.tooltip_text = "Hebt wartende Menschen an Haltestellen hervor."
+	var divider := VSeparator.new()
+	tools.add_child(divider)
 	pause_button = _toggle_button(tools, "Pause", func(_on: bool) -> void: toggle_pause())
+	pause_button.tooltip_text = "Verkehr anhalten oder fortsetzen · Leertaste"
 	var morning := Button.new()
-	morning.text = "Zum nächsten Morgen"
+	morning.text = "Nächster Morgen"
+	morning.tooltip_text = "Springt zum nächsten Berufsverkehr. So kannst du deine Linie beobachten."
 	morning.pressed.connect(_next_morning)
 	tools.add_child(morning)
-	_toggle_button(tools, "Wartende", _set_waiting)
-	_toggle_button(tools, "Wege anzeigen", _set_journeys)
+	var help := Button.new()
+	help.text = "?"
+	help.tooltip_text = "Bedienhinweise anzeigen oder ausblenden"
+	help.pressed.connect(func() -> void: guide_card.visible = not guide_card.visible)
+	tools.add_child(help)
+
+func _card_style() -> StyleBoxFlat:
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color("#172823f2")
+	style.border_color = Color("#546a5c")
+	style.set_border_width_all(1)
+	style.set_corner_radius_all(10)
+	style.content_margin_left = 14
+	style.content_margin_right = 14
+	style.content_margin_top = 10
+	style.content_margin_bottom = 10
+	return style
+
+func _make_guide(layer: CanvasLayer) -> void:
+	guide_card = PanelContainer.new()
+	layer.add_child(guide_card)
+	guide_card.position = Vector2(16, 16)
+	guide_card.custom_minimum_size.x = 360
+	guide_card.size.x = 360
+	guide_card.add_theme_stylebox_override("panel", _card_style())
+	var content := VBoxContainer.new()
+	content.add_theme_constant_override("separation", 6)
+	guide_card.add_child(content)
+	var heading := HBoxContainer.new()
+	content.add_child(heading)
+	guide_title = Label.new()
+	guide_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	guide_title.add_theme_font_size_override("font_size", 19)
+	guide_title.add_theme_color_override("font_color", Color("#e9f2df"))
+	heading.add_child(guide_title)
+	var close := Button.new()
+	close.text = "×"
+	close.tooltip_text = "Hinweise ausblenden"
+	close.flat = true
+	close.pressed.connect(guide_card.hide)
+	heading.add_child(close)
+	guide_text = Label.new()
+	guide_text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	guide_text.add_theme_font_size_override("font_size", 14)
+	guide_text.add_theme_color_override("font_color", Color("#cfdbce"))
+	content.add_child(guide_text)
+	guide_action = Button.new()
+	guide_action.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	guide_action.pressed.connect(func() -> void:
+		if guide_action_handler.is_valid():
+			guide_action_handler.call())
+	content.add_child(guide_action)
+
+func _show_guide(title: String, text: String, action_text := "", action := Callable()) -> void:
+	guide_title.text = title
+	guide_text.text = text
+	guide_action_handler = action
+	guide_action.text = action_text
+	guide_action.visible = not action_text.is_empty()
+	guide_card.set_deferred("size", Vector2(360, 0))
+
+func _show_explore() -> void:
+	_show_guide("Erkunden",
+		"Ziehe die Karte mit der Maus. Mit dem Mausrad zoomst du.\nViel Verkehr auf der Brücke? Klicke die Straße an und schau, wohin die Autos fahren.")
+
+func _show_line_guide() -> void:
+	if not drafting:
+		return
+	var place := "eine markierte Straße" if _kind() == "bus" else "ein markiertes Gleis"
+	match draft_stops.size():
+		0:
+			_show_guide("Erster Halt", "Klicke auf " + place + ". Wenn du mit der Maus darüberfährst, leuchten die erreichbaren Häuser auf.")
+		1:
+			_show_guide("Zweiter Halt", "Setze einen weiteren Halt. Die Stadt zeichnet den passenden Fahrweg für dich.")
+		_:
+			if draft_result.get("ok", false):
+				_show_guide("Linie prüfen", "Türkis zeigt den Fahrweg. Helle Häuser sind zu Fuß erreichbar. Ziehe den Fahrweg zum Ändern oder wähle unten die Abstände zwischen den Abfahrten und starte die Linie.")
+			else:
+				_show_guide("Fahrweg prüfen", "Die Verbindung ist gerade nicht befahrbar. Verschiebe einen Halt, entferne einen Wegpunkt oder nimm mit Esc den letzten Halt zurück.")
 
 func _toggle_button(parent: Control, title: String, action: Callable) -> Button:
 	var button := Button.new()
@@ -166,6 +280,7 @@ func toggle_pause() -> void:
 	paused = not paused
 	core.pause(paused)
 	pause_button.set_pressed_no_signal(paused)
+	pause_button.text = "Fortsetzen" if paused else "Pause"
 	time_buffer = 0.0
 
 func _next_morning() -> void:
@@ -195,6 +310,7 @@ func _refresh_snapshot() -> void:
 		_clear_marks(routes)
 		_clear_marks(waiting_markers)
 		_preview_line()
+		_update_stop_targets()
 	var positioned_walkers := []
 	for edge in snapshot.get("walkers", []):
 		var endpoints := _foot_endpoints(int(edge.edge), int(edge.from), int(edge.to))
@@ -204,6 +320,8 @@ func _refresh_snapshot() -> void:
 	_update_waiting()
 	if shows_journeys:
 		_update_journeys()
+		if not drafting and guide_title.text == "Autowege":
+			_show_journey_guide()
 
 func _update_camera() -> void:
 	camera.position = focus + Vector3(42, 55, 58)
@@ -213,25 +331,41 @@ func _update_camera() -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if not is_playable():
 		return
-	if event is InputEventMouseMotion and (event.button_mask & MOUSE_BUTTON_MASK_MIDDLE) != 0:
-		var direction: Vector3 = -camera.global_basis.x * event.relative.x + camera.global_basis.z * event.relative.y
-		direction.y = 0.0
-		focus += direction * camera_size / maxf(1.0, get_viewport().get_visible_rect().size.y)
-		_update_camera()
-	if event is InputEventMouseMotion and drafting:
-		_update_hover(event.position)
-	if event is InputEventMouseButton and not event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-		if dragged_leg >= 0 or moving_stop >= 0 or moving_waypoint.x >= 0:
-			_finish_drag(event.position)
-	if event is InputEventMouseButton and event.pressed:
-		match event.button_index:
-			MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN:
-				_zoom(event.position, 0.87 if event.button_index == MOUSE_BUTTON_WHEEL_UP else 1.15)
-			MOUSE_BUTTON_LEFT:
-				if drafting:
+	if event is InputEventMouseMotion:
+		var pan_buttons := MOUSE_BUTTON_MASK_MIDDLE | MOUSE_BUTTON_MASK_RIGHT
+		if (event.button_mask & MOUSE_BUTTON_MASK_LEFT) == 0:
+			explore_pressed = false
+			if drafting:
+				dragged_leg = -1
+				moving_stop = -1
+				moving_waypoint = Vector2i(-1, -1)
+		if explore_pressed and event.position.distance_to(explore_press) > 6.0:
+			explore_dragging = true
+		if (event.button_mask & pan_buttons) != 0 or (explore_pressed and explore_dragging):
+			var scale_per_pixel := camera_size / maxf(1.0, get_viewport().get_visible_rect().size.y)
+			var right := camera.global_basis.x
+			var forward := camera.global_basis.z.slide(Vector3.UP).normalized()
+			focus += (-right * event.relative.x + forward * event.relative.y) * scale_per_pixel
+			_update_camera()
+		elif drafting:
+			_update_hover(event.position)
+	if event is InputEventMouseButton:
+		if event.button_index == MOUSE_BUTTON_LEFT:
+			if drafting:
+				if event.pressed:
 					_build_at(event.position)
-				else:
+				elif dragged_leg >= 0 or moving_stop >= 0 or moving_waypoint.x >= 0:
+					_finish_drag(event.position)
+			elif event.pressed:
+				explore_press = event.position
+				explore_pressed = true
+				explore_dragging = false
+			else:
+				if explore_pressed and not explore_dragging:
 					_inspect(event.position)
+				explore_pressed = false
+		elif event.pressed and event.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
+			_zoom(event.position, 0.87 if event.button_index == MOUSE_BUTTON_WHEEL_UP else 1.15)
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_SPACE:
 			toggle_pause()
@@ -241,9 +375,12 @@ func _unhandled_input(event: InputEvent) -> void:
 				draft_legs.pop_back()
 				_preview_line()
 				return
-			selected_lane = -1
-			_clear_marks(routes)
+			if drafting:
+				_close_line_tool()
+				return
+			_select_street(-1)
 			status.text = ""
+			_show_explore()
 
 func _ground(screen: Vector2) -> Vector3:
 	var hit = Plane(Vector3.UP, 0).intersects_ray(camera.project_ray_origin(screen), camera.project_ray_normal(screen))
@@ -266,30 +403,62 @@ func _inspect(screen: Vector2) -> void:
 			return
 	for stop in snapshot.get("stops", []):
 		if city.stop_position(int(stop.id)).distance_to(point) < 2.0:
+			_select_street(-1)
 			if not taught_stop:
-				status.text = "Mit „Wartende“ siehst du die Gruppen auch aus der Ferne."
 				taught_stop = true
+				_show_guide("Haltestelle", "Schau zu, wer einsteigt und wer auf das nächste Fahrzeug wartet.",
+					"Wartende hervorheben", func() -> void: waiting_button.set_pressed(true))
+			else:
+				_show_guide("Haltestelle", "Hier halten Busse oder Straßenbahnen. Zoome näher heran, um die Wartenden zu sehen.")
 			return
-	selected_lane = city.lane_at(point)
-	selected_source = -1
+	_select_street(city.lane_at(point))
 	if selected_lane < 0:
-		status.text = ""
+		_show_explore()
+	elif shows_journeys:
+		_show_journey_guide()
 	elif not taught_street:
-		status.text = "Mit „Wege anzeigen“ kannst du Autofahrten zurückverfolgen."
 		taught_street = true
+		_show_guide("Straße ausgewählt", "Woher kommen die Autos auf dieser Straße, und wohin fahren sie?",
+			"Autowege anzeigen", func() -> void: journeys_button.set_pressed(true))
 	else:
-		status.text = ""
+		_show_guide("Straße ausgewählt", "Mit „Autowege“ kannst du Herkunft und Ziele direkt auf der Karte sehen.")
+
+func _select_street(lane: int) -> void:
+	if lane != selected_lane:
+		_clear_marks(routes)
+	selected_lane = lane
+	selected_source = -1
+	if is_instance_valid(selection_mark):
+		selection_mark.queue_free()
+	if lane >= 0:
+		selection_mark = _mark_curve(city.lane_curve(lane), Color("#fff2b5dd"), 0.44)
 	_update_journeys()
 
 func _set_waiting(on: bool) -> void:
 	shows_waiting = on
 	_update_waiting()
+	if on and not drafting:
+		_show_guide("Wartende an Haltestellen", "Gelbe Flächen heben die wartenden Gruppen hervor. Zoome näher heran, um zu sehen, wer einsteigt.")
+	elif not drafting:
+		_show_explore()
 
 func _set_journeys(on: bool) -> void:
 	shows_journeys = on
-	if on and selected_lane < 0:
-		status.text = "Wähle eine Straße auf der Karte."
 	_update_journeys()
+	if not drafting:
+		if on:
+			_show_journey_guide()
+		else:
+			_show_explore()
+
+func _show_journey_guide() -> void:
+	var text := "Klicke auf eine Straße, deren Verkehr dich interessiert."
+	if selected_lane >= 0:
+		text = "Orange zeigt Herkunft, Blau das Ziel. Klicke auf einen orange markierten Wohnblock, um seine Wege einzeln zu verfolgen."
+		if not has_journey_flows:
+			text = "Gerade führt keine erfasste Autofahrt über diesen Abschnitt. Probiere eine andere Straße oder schau beim nächsten Berufsverkehr wieder vorbei."
+	if guide_title.text != "Autowege" or guide_text.text != text:
+		_show_guide("Autowege", text)
 
 func _clear_marks(marks: Dictionary) -> void:
 	for mark in marks.values():
@@ -325,10 +494,12 @@ func _update_waiting() -> void:
 		marker.scale = Vector3(width, 1, width)
 
 func _update_journeys() -> void:
+	has_journey_flows = false
 	if not shows_journeys or selected_lane < 0:
 		_clear_marks(routes)
 		return
 	var flows: Array = core.private_flows(selected_lane)
+	has_journey_flows = not flows.is_empty()
 	var links := {}
 	var origins := {}
 	var targets := {}
@@ -402,12 +573,32 @@ func _mark_curve(curve: PackedVector3Array, color: Color, width: float) -> Node3
 
 func _set_drafting(on: bool) -> void:
 	drafting = on
+	explore_pressed = false
 	line_panel.visible = on
+	line_button.text = "Planung schließen" if on else "Linie bauen"
+	if on:
+		guide_card.show()
+	_update_stop_targets()
 	if on:
 		_select_line(line_selector.selected)
 	else:
 		_clear_draft()
-	status.text = "Wähle eine Straße oder ein Gleis für den ersten Halt." if on else ""
+	status.text = ""
+	if not on:
+		_show_explore()
+
+func _close_line_tool() -> void:
+	line_button.set_pressed_no_signal(false)
+	_set_drafting(false)
+
+func _update_stop_targets() -> void:
+	_clear_marks(stop_markers)
+	if not drafting or not is_playable():
+		return
+	for spec in world.lanes:
+		var lane := int(spec.id)
+		if _kind() in spec.allowed and _stop_zone(lane) >= 0:
+			stop_markers[lane] = _mark_curve(city.lane_curve(lane), Color("#ffe8a476"), 0.65)
 
 func _clear_draft() -> void:
 	moving_waypoint = Vector2i(-1, -1)
@@ -522,6 +713,8 @@ func _preview_line() -> void:
 		draft_result = core.line_edit(editing_line, _kind(), draft_stops, draft_legs, int(interval.value), false)
 		status.text = "" if draft_result.get("ok", false) else str(draft_result.get("error", ""))
 	launch_button.disabled = not draft_result.get("ok", false)
+	waypoint_button.visible = draft_legs.any(func(leg: Array) -> bool: return not leg.is_empty())
+	_show_line_guide()
 	if is_playable():
 		_redraw_draft()
 
@@ -539,7 +732,17 @@ func _redraw_draft() -> void:
 		candidates.append({"lane": hover_lane, "zone": _stop_zone(hover_lane)})
 	_draw_access(candidates)
 	for index in draft_stops.size():
-		_draft_pin("stop" + str(index), int(draft_stops[index].lane), Color("#7ee4c8"))
+		var key := "stop" + str(index)
+		_draft_pin(key, int(draft_stops[index].lane), Color("#7ee4c8"))
+		var label := Label3D.new()
+		label.text = str(index + 1)
+		label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		label.no_depth_test = true
+		label.font_size = 45
+		label.pixel_size = 0.027
+		label.outline_size = 10
+		label.position = Vector3.UP * 1.1
+		draft_marks[key].add_child(label)
 	for leg in draft_legs.size():
 		for pin in draft_legs[leg].size():
 			var color := Color("#a8d8f6") if draft_result.get("ok", false) else Color("#eda972")
@@ -659,7 +862,9 @@ func _start_line() -> void:
 	_refresh_snapshot()
 	line_selector.select(0)
 	_select_line(0)
-	status.text = "Linie in Betrieb."
+	_close_line_tool()
+	_show_guide("Linie fährt", "Schau an einer Haltestelle zu. Beim nächsten Berufsverkehr kannst du sehen, wie sich die Verbindung auf den Verkehr auswirkt.",
+		"Zum nächsten Morgen", _next_morning)
 
 func _select_line(index: int) -> void:
 	editing_line = -1 if index == 0 else line_selector.get_item_id(index)
