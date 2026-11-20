@@ -1,6 +1,6 @@
 # Arbeitsweise in transportsim
 
-- Arbeite auf `main` und committe regelmäßig in überprüften, zusammengehörigen Schritten.
+- Arbeite auf `main` und committe regelmäßig in überprüften, zusammengehörigen Schritten. Pushe überprüfte Commits regelmäßig auf `origin/main`.
 - Nutze `delegate-work-efficiently` für Recherche und Planung sowie `delegate-coding-efficiently` für die Umsetzung. Delegiere unabhängig prüfbare Pakete, wenn der Nutzen den Abstimmungsaufwand rechtfertigt.
 - Nutze `game-design`, `pc-games` und `3d-games` für die Spieloberfläche.
 - Nutze `test-driven-development` für neue Funktionen und Fehlerkorrekturen.
