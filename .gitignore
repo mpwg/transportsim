@@ -1,1 +1,4 @@
 /target/
+
+/game/.godot/
+/game/native/*.so
